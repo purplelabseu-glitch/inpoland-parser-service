@@ -27,15 +27,17 @@ class Settings(BaseSettings):
     request_timeout: int = Field(default=30, alias="REQUEST_TIMEOUT")
 
     # --- Браузер ---------------------------------------------------------
-    # primary = camoufox (как mobile.de); при CF/пустой странице — chromium.
+    # in-poland.com: Cloudflare часто режет Camoufox. По умолчанию auto =
+    # сначала Chromium, потом Camoufox. Можно: chromium | camoufox | auto
     browser_engine: str = Field(default="auto", alias="BROWSER_ENGINE")
     browser_headless: bool = Field(default=True, alias="BROWSER_HEADLESS")
-    nav_timeout_ms: int = Field(default=60000, alias="NAV_TIMEOUT_MS")
-    challenge_wait_s: int = Field(default=45, alias="CHALLENGE_WAIT_S")
+    nav_timeout_ms: int = Field(default=90000, alias="NAV_TIMEOUT_MS")
+    challenge_wait_s: int = Field(default=60, alias="CHALLENGE_WAIT_S")
     browser_concurrency: int = Field(default=1, alias="BROWSER_CONCURRENCY")
     browser_max_retries: int = Field(default=3, alias="BROWSER_MAX_RETRIES")
-    # locale/geo для in-poland (PL)
     browser_locale: str = Field(default="ru-RU", alias="BROWSER_LOCALE")
+    # Сколько секунд ждать появления .post-preview / .flex-block после goto
+    content_wait_s: int = Field(default=45, alias="CONTENT_WAIT_S")
 
     # --- Сбор ссылок -----------------------------------------------------
     collect_max_pages_default: int = Field(default=10, alias="COLLECT_MAX_PAGES_DEFAULT")

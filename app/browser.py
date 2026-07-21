@@ -1,7 +1,6 @@
-"""Браузерный fetch для in-poland.com: Camoufox → fallback Playwright Chromium.
+"""Браузерный fetch для in-poland.com: Chromium (CF) → fallback Camoufox.
 
 Прокси — как в mobilede-parser-service: HTTP напрямую, SOCKS через локальный релей.
-Без ручного CDP, headless, под cron/systemd.
 """
 
 from __future__ import annotations
@@ -48,6 +47,14 @@ def _playwright_proxy_from_url(proxy_url: str) -> dict[str, str]:
     raise ValueError(f"Unsupported proxy scheme for direct mode: {scheme}")
 
 
+def _expect_selector(expect: str) -> str | None:
+    if expect == "listing":
+        return ".post-preview"
+    if expect == "article":
+        return ".flex-block, figure figcaption, h1"
+    return None
+
+
 class BrowserManager:
     def __init__(self) -> None:
         self._relay: Socks5Relay | None = None
@@ -66,9 +73,16 @@ class BrowserManager:
         return template.replace("{session}", secrets.token_hex(6))
 
     async def start(self) -> None:
-        """Camoufox сразу. Chromium — лениво при fallback, чтобы сервис не падал,
-        если browsers скачаны под /root, а сервис крутится от User=u (HOME=APP_DIR)."""
+        """Chromium первым (Cloudflare на in-poland), Camoufox — запасной."""
         engine = (settings.browser_engine or "auto").lower()
+
+        if engine in ("auto", "chromium", "chrome"):
+            try:
+                await self._ensure_chromium()
+            except Exception as exc:  # noqa: BLE001
+                if engine == "chromium":
+                    raise
+                logger.warning("Chromium на старте недоступен: %s", exc)
 
         if engine in ("auto", "camoufox", "firefox"):
             self._camoufox_cm = AsyncCamoufox(
@@ -79,16 +93,10 @@ class BrowserManager:
             self._camoufox = await self._camoufox_cm.__aenter__()
             logger.info("Camoufox запущен (headless=%s)", settings.browser_headless)
 
-        if engine == "chromium":
-            await self._ensure_chromium()
-        elif engine in ("auto", "chrome"):
-            logger.info("Chromium: отложенный старт (fallback)")
-
         if self._camoufox is None and self._chromium is None:
-            if engine == "auto":
-                await self._ensure_chromium()
-            else:
-                raise ParserError(f"Неизвестный BROWSER_ENGINE={settings.browser_engine}")
+            raise ParserError(
+                f"Нет доступного браузера (BROWSER_ENGINE={settings.browser_engine})"
+            )
 
     async def _ensure_chromium(self) -> None:
         if self._chromium is not None:
@@ -98,16 +106,11 @@ class BrowserManager:
         try:
             self._chromium = await self._pw.chromium.launch(
                 headless=settings.browser_headless,
+                args=["--disable-blink-features=AutomationControlled"],
             )
             logger.info("Chromium запущен (headless=%s)", settings.browser_headless)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Chromium недоступен (%s). "
-                "Установите под сервисным юзером: "
-                "sudo -u USER HOME=APP_DIR PLAYWRIGHT_BROWSERS_PATH=APP_DIR/.cache/ms-playwright "
-                ".venv/bin/playwright install chromium",
-                exc,
-            )
+            logger.warning("Chromium недоступен: %s", exc)
             self._chromium = None
             raise
 
@@ -192,29 +195,18 @@ class BrowserManager:
     def _engines_order(self) -> list[tuple[str, object]]:
         engine = (settings.browser_engine or "auto").lower()
         order: list[tuple[str, object]] = []
-        if engine == "chromium":
-            if self._chromium is not None:
-                order.append(("chromium", self._chromium))
-        elif engine == "camoufox":
+        if engine == "camoufox":
             if self._camoufox is not None:
                 order.append(("camoufox", self._camoufox))
+        elif engine == "chromium":
+            if self._chromium is not None:
+                order.append(("chromium", self._chromium))
         else:
-            if self._camoufox is not None:
-                order.append(("camoufox", self._camoufox))
+            # auto: Chromium first (CF), then Camoufox
             if self._chromium is not None:
                 order.append(("chromium", self._chromium))
-        return order
-
-    async def _engines_for_fetch(self) -> list[tuple[str, object]]:
-        order = self._engines_order()
-        engine = (settings.browser_engine or "auto").lower()
-        # после исчерпания camoufox / если его нет — подтянуть chromium
-        if engine in ("auto", "chrome") and self._chromium is None:
-            # не стартуем chromium заранее; только если camoufox уже в списке
-            # и мы хотим иметь fallback — подтянем при первом вызове fetch,
-            # когда order ещё содержит только camoufox: добавим chromium в конец
-            # после неудачи camoufox через повторный вызов ниже в fetch_html.
-            pass
+            if self._camoufox is not None:
+                order.append(("camoufox", self._camoufox))
         return order
 
     @staticmethod
@@ -229,11 +221,26 @@ class BrowserManager:
             return is_article_html(html)
         return True
 
+    async def _safe_content(self, page) -> str:
+        for _ in range(10):
+            try:
+                return await page.content()
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc).lower()
+                if "navigating" in msg or "changing the content" in msg:
+                    await asyncio.sleep(0.5)
+                    continue
+                raise
+        return await page.content()
+
     async def _fetch_with_browser(
-        self, browser, url: str, engine_name: str
+        self, browser, url: str, engine_name: str, expect: str = "any"
     ) -> str:
         proxy_cfg = await self._resolve_proxy_config()
-        ctx_kwargs: dict = {"locale": settings.browser_locale}
+        ctx_kwargs: dict = {
+            "locale": settings.browser_locale,
+            "viewport": {"width": 1366, "height": 900},
+        }
         if proxy_cfg:
             ctx_kwargs["proxy"] = proxy_cfg
         if engine_name == "chromium":
@@ -244,51 +251,72 @@ class BrowserManager:
             )
         context = await browser.new_context(**ctx_kwargs)
         page = await context.new_page()
+        selector = _expect_selector(expect)
         try:
+            logger.info("goto [%s] %s (expect=%s)", engine_name, url, expect)
             await page.goto(
                 url,
                 wait_until="domcontentloaded",
                 timeout=settings.nav_timeout_ms,
             )
+
+            # 1) ждём ухода CF / появления контент-селектора
+            deadline = max(settings.challenge_wait_s, settings.content_wait_s)
             html = ""
-            for _ in range(settings.challenge_wait_s):
-                html = await page.content()
+            for tick in range(deadline):
+                html = await self._safe_content(page)
                 if looks_like_cloudflare(html):
+                    if tick % 5 == 0:
+                        logger.info(
+                            "[%s] Cloudflare/challenge… %ds", engine_name, tick
+                        )
                     await asyncio.sleep(1)
                     continue
-                if len(html) > 1500:
+
+                if selector:
+                    try:
+                        await page.wait_for_selector(selector, timeout=2000)
+                        html = await self._safe_content(page)
+                        if self._html_ok(html, expect):
+                            logger.info(
+                                "[%s] OK selector=%s len=%d",
+                                engine_name,
+                                selector,
+                                len(html),
+                            )
+                            return html
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                if self._html_ok(html, expect):
+                    logger.info("[%s] OK html len=%d", engine_name, len(html))
                     return html
+
                 await asyncio.sleep(1)
-            if looks_like_cloudflare(html):
-                raise UpstreamForbiddenError(
-                    f"Cloudflare не пройден ({engine_name})"
-                )
-            return html
+
+            title = ""
+            try:
+                title = await page.title()
+            except Exception:  # noqa: BLE001
+                pass
+            snippet = (html or "")[:200].replace("\n", " ")
+            raise UpstreamForbiddenError(
+                f"Нет контента / CF ({engine_name}, expect={expect}, "
+                f"title={title!r}, html[:200]={snippet!r})"
+            )
         finally:
             await context.close()
 
     async def fetch_html(self, url: str, expect: str = "any") -> str:
-        """Открывает URL. expect: listing | article | any — для валидации HTML."""
-        engines = await self._engines_for_fetch()
-        if not engines:
-            # попробуем chromium как последний шанс
-            try:
-                await self._ensure_chromium()
-                engines = self._engines_order()
-            except Exception as exc:  # noqa: BLE001
-                raise ParserError("Браузер не инициализирован") from exc
+        engines = self._engines_order()
         if not engines:
             raise ParserError("Браузер не инициализирован")
 
         attempts = max(settings.browser_max_retries, 1)
         last_error: Exception | None = None
-        tried_chromium_fallback = False
 
         async with self._semaphore:
-            idx = 0
-            while idx < len(engines):
-                engine_name, browser = engines[idx]
-                idx += 1
+            for engine_name, browser in engines:
                 for attempt in range(1, attempts + 1):
                     await self._rotate_proxy_session()
                     logger.info(
@@ -300,7 +328,7 @@ class BrowserManager:
                     )
                     try:
                         html = await self._fetch_with_browser(
-                            browser, url, engine_name
+                            browser, url, engine_name, expect=expect
                         )
                         if self._html_ok(html, expect):
                             self.last_engine = engine_name
@@ -324,24 +352,9 @@ class BrowserManager:
                             await asyncio.sleep(settings.retry_backoff)
 
                 logger.warning(
-                    "Движок %s исчерпал попытки — пробуем следующий (если есть)",
+                    "Движок %s исчерпал попытки — следующий (если есть)",
                     engine_name,
                 )
-
-                # после провала camoufox — лениво поднять chromium
-                if (
-                    not tried_chromium_fallback
-                    and engine_name == "camoufox"
-                    and self._chromium is None
-                    and (settings.browser_engine or "auto").lower() in ("auto", "chrome")
-                ):
-                    tried_chromium_fallback = True
-                    try:
-                        await self._ensure_chromium()
-                        if self._chromium is not None:
-                            engines.append(("chromium", self._chromium))
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("Fallback Chromium не стартовал: %s", exc)
 
             assert last_error is not None
             raise last_error
