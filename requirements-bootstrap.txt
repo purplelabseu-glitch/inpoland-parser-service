@@ -1,0 +1,3 @@
+# Минимум для ручного обхода Cloudflare на Windows (не нужен полный requirements.txt)
+playwright==1.49.1
+python-dotenv==1.0.1
