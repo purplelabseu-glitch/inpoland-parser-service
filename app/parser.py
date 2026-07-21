@@ -48,20 +48,30 @@ def listing_page_url(category_url: str, page: int) -> str:
 
 
 def looks_like_cloudflare(html: str) -> bool:
+    # Уже реальная лента/статья — не считать CF (скрипты CF часто остаются в DOM)
+    if "post-preview" in html or "flex-block" in html:
+        return False
+    if 'class="post"' in html or " class='post'" in html or ' class="post ' in html:
+        return False
     low = html.lower()
     markers = (
         "just a moment",
         "cf-browser-verification",
         "challenge-platform",
         "cdn-cgi/challenge",
-        "attention required! | cloudflare",
         "checking your browser",
+        "attention required! | cloudflare",
     )
     return any(m in low for m in markers)
 
 
 def is_listing_html(html: str) -> bool:
-    return "post-preview" in html
+    return (
+        "post-preview" in html
+        or 'class="post"' in html
+        or " class='post'" in html
+        or ' class="post ' in html
+    )
 
 
 def is_article_html(html: str) -> bool:
@@ -111,6 +121,29 @@ def extract_listing_items(html: str, base_url: str = BASE) -> list[dict[str, str
                 "image": image,
             }
         )
+
+    # fallback: прямые a.post (как в bootstrap)
+    if not items:
+        for link in soup.select("a.post[href], h2 a[href]"):
+            href = (link.get("href") or "").strip()
+            if not href or "/category/" in href:
+                continue
+            url = urljoin(base_url, href)
+            if url in seen or "in-poland.com" not in url:
+                continue
+            title = (link.get_text(" ", strip=True) or link.get("title") or "").strip()
+            if not title or len(title) < 8:
+                continue
+            seen.add(url)
+            items.append(
+                {
+                    "url": url,
+                    "title": title,
+                    "date": "",
+                    "excerpt": "",
+                    "image": "",
+                }
+            )
     return items
 
 

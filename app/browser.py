@@ -51,7 +51,7 @@ def _playwright_proxy_from_url(proxy_url: str) -> dict[str, str]:
 
 def _expect_selector(expect: str) -> str | None:
     if expect == "listing":
-        return ".post-preview"
+        return ".post-preview, a.post"
     if expect == "article":
         return ".flex-block, figure figcaption, h1"
     return None
@@ -373,31 +373,36 @@ class BrowserManager:
         deadline = max(settings.challenge_wait_s, settings.content_wait_s)
         html = ""
         for tick in range(deadline):
+            # 1) Сначала контент (CF-маркеры в DOM часто ложные)
+            if selector:
+                try:
+                    loc = page.locator(selector)
+                    if await loc.count() > 0:
+                        html = await self._safe_content(page)
+                        if self._html_ok(html, expect) or (
+                            expect == "listing" and is_listing_html(html)
+                        ):
+                            logger.info(
+                                "[%s] OK selector=%s count=%d len=%d",
+                                engine_name,
+                                selector,
+                                await loc.count(),
+                                len(html),
+                            )
+                            return html
+                except Exception:  # noqa: BLE001
+                    pass
+
             html = await self._safe_content(page)
+            if self._html_ok(html, expect):
+                logger.info("[%s] OK html len=%d", engine_name, len(html))
+                return html
+
             if looks_like_cloudflare(html):
                 if tick % 5 == 0:
                     logger.info("[%s] Cloudflare/challenge… %ds", engine_name, tick)
                 await asyncio.sleep(1)
                 continue
-
-            if selector:
-                try:
-                    await page.wait_for_selector(selector, timeout=2000)
-                    html = await self._safe_content(page)
-                    if self._html_ok(html, expect):
-                        logger.info(
-                            "[%s] OK selector=%s len=%d",
-                            engine_name,
-                            selector,
-                            len(html),
-                        )
-                        return html
-                except Exception:  # noqa: BLE001
-                    pass
-
-            if self._html_ok(html, expect):
-                logger.info("[%s] OK html len=%d", engine_name, len(html))
-                return html
 
             await asyncio.sleep(1)
 
@@ -406,6 +411,12 @@ class BrowserManager:
             title = await page.title()
         except Exception:  # noqa: BLE001
             pass
+        # Последний шанс: title уже «живой»
+        if expect == "listing" and "публикации" in title.lower():
+            html = await self._safe_content(page)
+            if is_listing_html(html) or len(html) > 20000:
+                logger.info("[%s] OK by title=%r len=%d", engine_name, title, len(html))
+                return html
         snippet = (html or "")[:200].replace("\n", " ")
         raise UpstreamForbiddenError(
             f"Нет контента / CF ({engine_name}, expect={expect}, "
@@ -423,27 +434,34 @@ class BrowserManager:
         async with self._semaphore:
             for engine_name, _browser in engines:
                 for attempt in range(1, attempts + 1):
-                    # С куками / sticky — не сбрасываем IP на 1-й попытке.
-                    # Сброс только со 2-й попытки того же движка (CF заново).
-                    reset = attempt > 1
-                    if reset:
-                        await self._close_sticky_chromium()
+                    # cf_clearance привязан к IP — при живых cookies НЕ refresh-ip
+                    has_cookies = self._storage_path.is_file()
+                    reset = attempt > 1 and not has_cookies
+                    if attempt > 1 and has_cookies:
+                        logger.info(
+                            "Повтор без смены IP (есть cookies / cf_clearance)"
+                        )
+                        await self._close_sticky_chromium(save=False)
+                        await asyncio.sleep(settings.retry_backoff)
+                    elif reset:
+                        await self._close_sticky_chromium(save=False)
                         await self._refresh_ip()
                         await self._resolve_proxy_config(force_new_session=True)
                         await asyncio.sleep(settings.retry_backoff)
 
                     logger.info(
-                        "Fetch [%s] попытка %d/%d -> %s (reset_session=%s)",
+                        "Fetch [%s] попытка %d/%d -> %s (reset_session=%s, cookies=%s)",
                         engine_name,
                         attempt,
                         attempts,
                         url,
                         reset,
+                        has_cookies,
                     )
                     try:
                         if engine_name == "chromium":
                             html = await self._fetch_chromium(
-                                url, expect, reset_session=reset
+                                url, expect, reset_session=(attempt > 1)
                             )
                         else:
                             html = await self._fetch_camoufox(url, expect)
