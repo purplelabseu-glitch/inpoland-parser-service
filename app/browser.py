@@ -144,18 +144,19 @@ class BrowserManager:
             self._relay = None
         logger.info("Браузеры остановлены")
 
-    async def _close_sticky_chromium(self) -> None:
+    async def _close_sticky_chromium(self, *, save: bool = False) -> None:
         if self._chromium_context is not None:
-            try:
-                await self._save_storage(self._chromium_context)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Не удалось сохранить cookies: %s", exc)
+            if save:
+                try:
+                    await self._save_storage(self._chromium_context)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Не удалось сохранить cookies: %s", exc)
             try:
                 await self._chromium_context.close()
             except Exception:  # noqa: BLE001
                 pass
             self._chromium_context = None
-            self._sticky_proxy_cfg = None
+            # sticky proxy cfg оставляем — тот же IP полезен с куками
 
     async def _save_storage(self, context) -> None:
         self._storage_path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,7 +328,7 @@ class BrowserManager:
             )
             await page.goto(
                 url,
-                wait_until="domcontentloaded",
+                wait_until="commit",
                 timeout=settings.nav_timeout_ms,
             )
             html = await self._wait_for_content(page, "chromium", expect, selector)
@@ -336,10 +337,6 @@ class BrowserManager:
         finally:
             await page.close()
             if must_close:
-                try:
-                    await self._save_storage(context)
-                except Exception:  # noqa: BLE001
-                    pass
                 await context.close()
 
     async def _fetch_camoufox(self, url: str, expect: str) -> str:
