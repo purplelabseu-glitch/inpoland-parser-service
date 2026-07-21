@@ -1,0 +1,19 @@
+# systemd unit. build.sh подставит путь и User.
+# Порт 8001 — рядом с mobilede на :8000, не пересекается.
+[Unit]
+Description=in-poland.com parser (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/inpoland-parser
+Environment=HOME=/opt/inpoland-parser
+Environment=PYTHONIOENCODING=utf-8
+EnvironmentFile=/opt/inpoland-parser/.env
+ExecStart=/opt/inpoland-parser/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
