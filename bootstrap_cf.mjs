@@ -74,6 +74,21 @@ async function main() {
 
   let ok = false;
   for (let i = 0; i < 300; i++) {
+    // Сначала успех: лента уже видна (CF-скрипты могут остаться в HTML)
+    try {
+      const n = await page.locator(".post-preview").count();
+      if (n > 0) {
+        const visible = await page.locator(".post-preview").first().isVisible();
+        if (visible) {
+          ok = true;
+          console.log(`Лента найдена (${n} .post-preview)`);
+          break;
+        }
+      }
+    } catch {
+      /* keep waiting */
+    }
+
     let html = "";
     try {
       html = await page.content();
@@ -81,20 +96,16 @@ async function main() {
       await page.waitForTimeout(1000);
       continue;
     }
-    if (looksLikeCf(html)) {
-      if (i % 10 === 0) console.log(`  CF ещё активен (${i}s) — кликни галочку`);
-      await page.waitForTimeout(1000);
-      continue;
+    if (html.includes("post-preview")) {
+      ok = true;
+      console.log("Лента найдена в HTML");
+      break;
     }
-    try {
-      await page.waitForSelector(".post-preview", { timeout: 2000 });
-      html = await page.content();
-      if (html.includes("post-preview")) {
-        ok = true;
-        break;
-      }
-    } catch {
-      /* keep waiting */
+    if (looksLikeCf(html)) {
+      if (i % 10 === 0) console.log(`  CF ещё активен (${i}s) — кликни галочку если есть`);
+    } else if (i % 10 === 0) {
+      const title = await page.title().catch(() => "");
+      console.log(`  жду ленту… (${i}s) title=${JSON.stringify(title)}`);
     }
     await page.waitForTimeout(1000);
   }
