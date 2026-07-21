@@ -7,3 +7,7 @@ __pycache__/
 downloads/
 *.log
 .pytest_cache/
+
+node_modules/
+package-lock.json
+
