@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     # Сколько секунд ждать появления .post-preview / .flex-block после goto
     content_wait_s: int = Field(default=45, alias="CONTENT_WAIT_S")
 
+    # Cookies / Cloudflare: storage_state Playwright (cf_clearance и др.)
+    # Путь относительно cwd сервиса или абсолютный.
+    storage_state_path: Path = Field(
+        default=Path(".cache/inpoland-storage.json"),
+        alias="STORAGE_STATE_PATH",
+    )
+    # Держать один Chromium-контекст между запросами (куки + sticky IP)
+    sticky_chromium: bool = Field(default=True, alias="STICKY_CHROMIUM")
+    # Не крутить {session}/refresh-ip на каждой попытке, пока есть сохранённые куки
+    sticky_proxy: bool = Field(default=True, alias="STICKY_PROXY")
+
     # --- Сбор ссылок -----------------------------------------------------
     collect_max_pages_default: int = Field(default=10, alias="COLLECT_MAX_PAGES_DEFAULT")
     collect_max_pages_limit: int = Field(default=20, alias="COLLECT_MAX_PAGES_LIMIT")

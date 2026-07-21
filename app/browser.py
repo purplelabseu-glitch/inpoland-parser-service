@@ -1,6 +1,7 @@
-"""Браузерный fetch для in-poland.com: Chromium (CF) → fallback Camoufox.
+"""Браузерный fetch для in-poland.com: Chromium + cookies (CF) → fallback Camoufox.
 
-Прокси — как в mobilede-parser-service: HTTP напрямую, SOCKS через локальный релей.
+Cloudflare: сохраняем storage_state (cf_clearance и др.), sticky-контекст Chromium
+и по возможности один sticky IP прокси — как warm Chrome-сессия в inpoland-bot.
 """
 
 from __future__ import annotations
@@ -8,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -62,9 +64,13 @@ class BrowserManager:
         self._camoufox = None
         self._pw = None
         self._chromium = None
+        # sticky Chromium context (cookies + same proxy)
+        self._chromium_context = None
+        self._sticky_proxy_cfg: dict[str, str] | None = None
         self._semaphore = asyncio.Semaphore(settings.browser_concurrency)
         self._proxy_template: str | None = settings.proxy_url
         self.last_engine: str = ""
+        self._storage_path = Path(settings.storage_state_path)
 
     @staticmethod
     def _apply_session(template: str) -> str:
@@ -73,7 +79,6 @@ class BrowserManager:
         return template.replace("{session}", secrets.token_hex(6))
 
     async def start(self) -> None:
-        """Chromium первым (Cloudflare на in-poland), Camoufox — запасной."""
         engine = (settings.browser_engine or "auto").lower()
 
         if engine in ("auto", "chromium", "chrome"):
@@ -98,6 +103,14 @@ class BrowserManager:
                 f"Нет доступного браузера (BROWSER_ENGINE={settings.browser_engine})"
             )
 
+        if self._storage_path.is_file():
+            logger.info("Найден storage_state (cookies): %s", self._storage_path)
+        else:
+            logger.info(
+                "storage_state пока нет (%s) — после первого успешного обхода CF сохранится",
+                self._storage_path,
+            )
+
     async def _ensure_chromium(self) -> None:
         if self._chromium is not None:
             return
@@ -115,6 +128,7 @@ class BrowserManager:
             raise
 
     async def stop(self) -> None:
+        await self._close_sticky_chromium()
         if self._camoufox_cm is not None:
             await self._camoufox_cm.__aexit__(None, None, None)
             self._camoufox_cm = None
@@ -130,29 +144,65 @@ class BrowserManager:
             self._relay = None
         logger.info("Браузеры остановлены")
 
-    async def _resolve_proxy_config(self) -> dict[str, str] | None:
+    async def _close_sticky_chromium(self) -> None:
+        if self._chromium_context is not None:
+            try:
+                await self._save_storage(self._chromium_context)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Не удалось сохранить cookies: %s", exc)
+            try:
+                await self._chromium_context.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._chromium_context = None
+            self._sticky_proxy_cfg = None
+
+    async def _save_storage(self, context) -> None:
+        self._storage_path.parent.mkdir(parents=True, exist_ok=True)
+        await context.storage_state(path=str(self._storage_path))
+        logger.info("Cookies сохранены: %s", self._storage_path)
+
+    async def _resolve_proxy_config(self, *, force_new_session: bool = False) -> dict[str, str] | None:
         if not self._proxy_template:
             return None
+
+        # sticky: переиспользуем уже поднятый proxy cfg / relay
+        if (
+            settings.sticky_proxy
+            and not force_new_session
+            and self._sticky_proxy_cfg is not None
+        ):
+            return self._sticky_proxy_cfg
+
+        if force_new_session or self._sticky_proxy_cfg is None:
+            await self._rotate_proxy_session()
+
         upstream = _relay_upstream(self._apply_session(self._proxy_template))
         parsed = urlparse(upstream)
         scheme = (parsed.scheme or "").lower()
         if scheme in ("http", "https"):
-            return _playwright_proxy_from_url(upstream)
-        if scheme.startswith("socks5"):
+            cfg = _playwright_proxy_from_url(upstream)
+        elif scheme.startswith("socks5"):
             if self._relay is None or self._relay.upstream_url != upstream:
                 if self._relay is not None:
                     await self._relay.stop()
                 self._relay = await Socks5Relay(upstream).start()
-            return {"server": self._relay.address}
-        raise ProxyError(f"Неподдерживаемая схема PROXY_URL: {scheme}")
+            cfg = {"server": self._relay.address}
+        else:
+            raise ProxyError(f"Неподдерживаемая схема PROXY_URL: {scheme}")
+
+        self._sticky_proxy_cfg = cfg
+        return cfg
 
     async def _rotate_proxy_session(self) -> None:
-        if not self._proxy_template or "{session}" not in self._proxy_template:
+        if not self._proxy_template:
             return
         if self._relay is not None:
             await self._relay.stop()
             self._relay = None
-        logger.info("Прокси-сессия: новый {session}")
+        self._sticky_proxy_cfg = None
+        if "{session}" in self._proxy_template:
+            logger.info("Прокси-сессия: новый {session}")
 
     async def _refresh_ip(self) -> None:
         url = settings.proxy_refresh_url
@@ -182,6 +232,8 @@ class BrowserManager:
                 "host": parsed.hostname or "",
                 "status": str(resp.status_code),
                 "detail": resp.text[:120] if ok else resp.text[:200],
+                "cookies_file": str(self._storage_path),
+                "cookies_present": self._storage_path.is_file(),
             }
         except Exception as exc:  # noqa: BLE001
             return {
@@ -202,7 +254,6 @@ class BrowserManager:
             if self._chromium is not None:
                 order.append(("chromium", self._chromium))
         else:
-            # auto: Chromium first (CF), then Camoufox
             if self._chromium is not None:
                 order.append(("chromium", self._chromium))
             if self._camoufox is not None:
@@ -233,79 +284,136 @@ class BrowserManager:
                 raise
         return await page.content()
 
-    async def _fetch_with_browser(
-        self, browser, url: str, engine_name: str, expect: str = "any"
-    ) -> str:
-        proxy_cfg = await self._resolve_proxy_config()
+    async def _get_chromium_context(self, *, force_new: bool = False):
+        if force_new:
+            await self._close_sticky_chromium()
+
+        if settings.sticky_chromium and self._chromium_context is not None:
+            return self._chromium_context, False  # shared, don't close
+
+        proxy_cfg = await self._resolve_proxy_config(force_new_session=force_new)
+        ctx_kwargs: dict = {
+            "locale": settings.browser_locale,
+            "viewport": {"width": 1366, "height": 900},
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        }
+        if proxy_cfg:
+            ctx_kwargs["proxy"] = proxy_cfg
+        if self._storage_path.is_file():
+            ctx_kwargs["storage_state"] = str(self._storage_path)
+            logger.info("Подставляю cookies из %s", self._storage_path)
+
+        context = await self._chromium.new_context(**ctx_kwargs)
+        if settings.sticky_chromium:
+            self._chromium_context = context
+            return context, False
+        return context, True  # caller must close
+
+    async def _fetch_chromium(self, url: str, expect: str, *, reset_session: bool) -> str:
+        context, must_close = await self._get_chromium_context(force_new=reset_session)
+        page = await context.new_page()
+        selector = _expect_selector(expect)
+        try:
+            logger.info(
+                "goto [chromium] %s (expect=%s, cookies=%s, reset=%s)",
+                url,
+                expect,
+                self._storage_path.is_file(),
+                reset_session,
+            )
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=settings.nav_timeout_ms,
+            )
+            html = await self._wait_for_content(page, "chromium", expect, selector)
+            await self._save_storage(context)
+            return html
+        finally:
+            await page.close()
+            if must_close:
+                try:
+                    await self._save_storage(context)
+                except Exception:  # noqa: BLE001
+                    pass
+                await context.close()
+
+    async def _fetch_camoufox(self, url: str, expect: str) -> str:
+        proxy_cfg = await self._resolve_proxy_config(force_new_session=False)
         ctx_kwargs: dict = {
             "locale": settings.browser_locale,
             "viewport": {"width": 1366, "height": 900},
         }
         if proxy_cfg:
             ctx_kwargs["proxy"] = proxy_cfg
-        if engine_name == "chromium":
-            ctx_kwargs["user_agent"] = (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        context = await browser.new_context(**ctx_kwargs)
+        if self._storage_path.is_file():
+            ctx_kwargs["storage_state"] = str(self._storage_path)
+
+        context = await self._camoufox.new_context(**ctx_kwargs)
         page = await context.new_page()
         selector = _expect_selector(expect)
         try:
-            logger.info("goto [%s] %s (expect=%s)", engine_name, url, expect)
+            logger.info("goto [camoufox] %s (expect=%s)", url, expect)
             await page.goto(
                 url,
                 wait_until="domcontentloaded",
                 timeout=settings.nav_timeout_ms,
             )
-
-            # 1) ждём ухода CF / появления контент-селектора
-            deadline = max(settings.challenge_wait_s, settings.content_wait_s)
-            html = ""
-            for tick in range(deadline):
-                html = await self._safe_content(page)
-                if looks_like_cloudflare(html):
-                    if tick % 5 == 0:
-                        logger.info(
-                            "[%s] Cloudflare/challenge… %ds", engine_name, tick
-                        )
-                    await asyncio.sleep(1)
-                    continue
-
-                if selector:
-                    try:
-                        await page.wait_for_selector(selector, timeout=2000)
-                        html = await self._safe_content(page)
-                        if self._html_ok(html, expect):
-                            logger.info(
-                                "[%s] OK selector=%s len=%d",
-                                engine_name,
-                                selector,
-                                len(html),
-                            )
-                            return html
-                    except Exception:  # noqa: BLE001
-                        pass
-
-                if self._html_ok(html, expect):
-                    logger.info("[%s] OK html len=%d", engine_name, len(html))
-                    return html
-
-                await asyncio.sleep(1)
-
-            title = ""
+            html = await self._wait_for_content(page, "camoufox", expect, selector)
             try:
-                title = await page.title()
-            except Exception:  # noqa: BLE001
-                pass
-            snippet = (html or "")[:200].replace("\n", " ")
-            raise UpstreamForbiddenError(
-                f"Нет контента / CF ({engine_name}, expect={expect}, "
-                f"title={title!r}, html[:200]={snippet!r})"
-            )
+                await self._save_storage(context)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Camoufox: cookies не сохранены: %s", exc)
+            return html
         finally:
             await context.close()
+
+    async def _wait_for_content(self, page, engine_name: str, expect: str, selector: str | None) -> str:
+        deadline = max(settings.challenge_wait_s, settings.content_wait_s)
+        html = ""
+        for tick in range(deadline):
+            html = await self._safe_content(page)
+            if looks_like_cloudflare(html):
+                if tick % 5 == 0:
+                    logger.info("[%s] Cloudflare/challenge… %ds", engine_name, tick)
+                await asyncio.sleep(1)
+                continue
+
+            if selector:
+                try:
+                    await page.wait_for_selector(selector, timeout=2000)
+                    html = await self._safe_content(page)
+                    if self._html_ok(html, expect):
+                        logger.info(
+                            "[%s] OK selector=%s len=%d",
+                            engine_name,
+                            selector,
+                            len(html),
+                        )
+                        return html
+                except Exception:  # noqa: BLE001
+                    pass
+
+            if self._html_ok(html, expect):
+                logger.info("[%s] OK html len=%d", engine_name, len(html))
+                return html
+
+            await asyncio.sleep(1)
+
+        title = ""
+        try:
+            title = await page.title()
+        except Exception:  # noqa: BLE001
+            pass
+        snippet = (html or "")[:200].replace("\n", " ")
+        raise UpstreamForbiddenError(
+            f"Нет контента / CF ({engine_name}, expect={expect}, "
+            f"title={title!r}, html[:200]={snippet!r})"
+        )
 
     async def fetch_html(self, url: str, expect: str = "any") -> str:
         engines = self._engines_order()
@@ -316,20 +424,33 @@ class BrowserManager:
         last_error: Exception | None = None
 
         async with self._semaphore:
-            for engine_name, browser in engines:
+            for engine_name, _browser in engines:
                 for attempt in range(1, attempts + 1):
-                    await self._rotate_proxy_session()
+                    # С куками / sticky — не сбрасываем IP на 1-й попытке.
+                    # Сброс только со 2-й попытки того же движка (CF заново).
+                    reset = attempt > 1
+                    if reset:
+                        await self._close_sticky_chromium()
+                        await self._refresh_ip()
+                        await self._resolve_proxy_config(force_new_session=True)
+                        await asyncio.sleep(settings.retry_backoff)
+
                     logger.info(
-                        "Fetch [%s] попытка %d/%d -> %s",
+                        "Fetch [%s] попытка %d/%d -> %s (reset_session=%s)",
                         engine_name,
                         attempt,
                         attempts,
                         url,
+                        reset,
                     )
                     try:
-                        html = await self._fetch_with_browser(
-                            browser, url, engine_name, expect=expect
-                        )
+                        if engine_name == "chromium":
+                            html = await self._fetch_chromium(
+                                url, expect, reset_session=reset
+                            )
+                        else:
+                            html = await self._fetch_camoufox(url, expect)
+
                         if self._html_ok(html, expect):
                             self.last_engine = engine_name
                             return html
@@ -339,22 +460,17 @@ class BrowserManager:
                     except (UpstreamForbiddenError, ProxyError) as exc:
                         last_error = exc
                         logger.warning("%s", exc)
-                        if attempt < attempts:
-                            await self._refresh_ip()
-                            await asyncio.sleep(settings.retry_backoff)
                     except Exception as exc:  # noqa: BLE001
                         last_error = ProxyError(
                             f"Ошибка навигации ({engine_name}): {exc}"
                         )
                         logger.warning("%s", last_error)
-                        if attempt < attempts:
-                            await self._refresh_ip()
-                            await asyncio.sleep(settings.retry_backoff)
 
                 logger.warning(
                     "Движок %s исчерпал попытки — следующий (если есть)",
                     engine_name,
                 )
+                await self._close_sticky_chromium()
 
             assert last_error is not None
             raise last_error
