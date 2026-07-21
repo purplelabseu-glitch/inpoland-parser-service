@@ -9,11 +9,15 @@ Type=simple
 User=www-data
 WorkingDirectory=/opt/inpoland-parser
 Environment=HOME=/opt/inpoland-parser
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/inpoland-parser/.cache/ms-playwright
 Environment=PYTHONIOENCODING=utf-8
 EnvironmentFile=/opt/inpoland-parser/.env
 ExecStart=/opt/inpoland-parser/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001
 Restart=on-failure
 RestartSec=5
+# Не долбить рестарт при ошибке старта браузера слишком часто
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target

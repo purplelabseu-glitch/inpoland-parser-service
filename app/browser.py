@@ -66,7 +66,10 @@ class BrowserManager:
         return template.replace("{session}", secrets.token_hex(6))
 
     async def start(self) -> None:
+        """Camoufox сразу. Chromium — лениво при fallback, чтобы сервис не падал,
+        если browsers скачаны под /root, а сервис крутится от User=u (HOME=APP_DIR)."""
         engine = (settings.browser_engine or "auto").lower()
+
         if engine in ("auto", "camoufox", "firefox"):
             self._camoufox_cm = AsyncCamoufox(
                 headless=settings.browser_headless,
@@ -76,15 +79,37 @@ class BrowserManager:
             self._camoufox = await self._camoufox_cm.__aenter__()
             logger.info("Camoufox запущен (headless=%s)", settings.browser_headless)
 
-        if engine in ("auto", "chromium", "chrome"):
+        if engine == "chromium":
+            await self._ensure_chromium()
+        elif engine in ("auto", "chrome"):
+            logger.info("Chromium: отложенный старт (fallback)")
+
+        if self._camoufox is None and self._chromium is None:
+            if engine == "auto":
+                await self._ensure_chromium()
+            else:
+                raise ParserError(f"Неизвестный BROWSER_ENGINE={settings.browser_engine}")
+
+    async def _ensure_chromium(self) -> None:
+        if self._chromium is not None:
+            return
+        if self._pw is None:
             self._pw = await async_playwright().start()
+        try:
             self._chromium = await self._pw.chromium.launch(
                 headless=settings.browser_headless,
             )
             logger.info("Chromium запущен (headless=%s)", settings.browser_headless)
-
-        if self._camoufox is None and self._chromium is None:
-            raise ParserError(f"Неизвестный BROWSER_ENGINE={settings.browser_engine}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Chromium недоступен (%s). "
+                "Установите под сервисным юзером: "
+                "sudo -u USER HOME=APP_DIR PLAYWRIGHT_BROWSERS_PATH=APP_DIR/.cache/ms-playwright "
+                ".venv/bin/playwright install chromium",
+                exc,
+            )
+            self._chromium = None
+            raise
 
     async def stop(self) -> None:
         if self._camoufox_cm is not None:
@@ -180,6 +205,18 @@ class BrowserManager:
                 order.append(("chromium", self._chromium))
         return order
 
+    async def _engines_for_fetch(self) -> list[tuple[str, object]]:
+        order = self._engines_order()
+        engine = (settings.browser_engine or "auto").lower()
+        # после исчерпания camoufox / если его нет — подтянуть chromium
+        if engine in ("auto", "chrome") and self._chromium is None:
+            # не стартуем chromium заранее; только если camoufox уже в списке
+            # и мы хотим иметь fallback — подтянем при первом вызове fetch,
+            # когда order ещё содержит только camoufox: добавим chromium в конец
+            # после неудачи camoufox через повторный вызов ниже в fetch_html.
+            pass
+        return order
+
     @staticmethod
     def _html_ok(html: str, expect: str) -> bool:
         if not html or len(html) < 500:
@@ -232,15 +269,26 @@ class BrowserManager:
 
     async def fetch_html(self, url: str, expect: str = "any") -> str:
         """Открывает URL. expect: listing | article | any — для валидации HTML."""
-        engines = self._engines_order()
+        engines = await self._engines_for_fetch()
+        if not engines:
+            # попробуем chromium как последний шанс
+            try:
+                await self._ensure_chromium()
+                engines = self._engines_order()
+            except Exception as exc:  # noqa: BLE001
+                raise ParserError("Браузер не инициализирован") from exc
         if not engines:
             raise ParserError("Браузер не инициализирован")
 
         attempts = max(settings.browser_max_retries, 1)
         last_error: Exception | None = None
+        tried_chromium_fallback = False
 
         async with self._semaphore:
-            for engine_name, browser in engines:
+            idx = 0
+            while idx < len(engines):
+                engine_name, browser = engines[idx]
+                idx += 1
                 for attempt in range(1, attempts + 1):
                     await self._rotate_proxy_session()
                     logger.info(
@@ -267,15 +315,33 @@ class BrowserManager:
                             await self._refresh_ip()
                             await asyncio.sleep(settings.retry_backoff)
                     except Exception as exc:  # noqa: BLE001
-                        last_error = ProxyError(f"Ошибка навигации ({engine_name}): {exc}")
+                        last_error = ProxyError(
+                            f"Ошибка навигации ({engine_name}): {exc}"
+                        )
                         logger.warning("%s", last_error)
                         if attempt < attempts:
                             await self._refresh_ip()
                             await asyncio.sleep(settings.retry_backoff)
+
                 logger.warning(
                     "Движок %s исчерпал попытки — пробуем следующий (если есть)",
                     engine_name,
                 )
+
+                # после провала camoufox — лениво поднять chromium
+                if (
+                    not tried_chromium_fallback
+                    and engine_name == "camoufox"
+                    and self._chromium is None
+                    and (settings.browser_engine or "auto").lower() in ("auto", "chrome")
+                ):
+                    tried_chromium_fallback = True
+                    try:
+                        await self._ensure_chromium()
+                        if self._chromium is not None:
+                            engines.append(("chromium", self._chromium))
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Fallback Chromium не стартовал: %s", exc)
 
             assert last_error is not None
             raise last_error

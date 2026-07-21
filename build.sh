@@ -45,9 +45,9 @@ source "$VENV/bin/activate"
 "$PY" -m pip install --upgrade pip
 "$PY" -m pip install -r "$APP_DIR/requirements.txt"
 
-# Firefox deps (camoufox) + Chromium browser binary
+# Firefox deps (camoufox) + Chromium — binaries ОБЯЗАТЕЛЬНО под SERVICE_USER / HOME=APP_DIR
+# (иначе playwright кладёт в /root/.cache, а systemd User=u ищет в APP_DIR/.cache)
 "$PY" -m playwright install-deps firefox chromium || true
-"$PY" -m playwright install chromium
 
 if [ ! -f "$APP_DIR/.env" ]; then
     cp "$APP_DIR/.env.example" "$APP_DIR/.env"
@@ -56,22 +56,36 @@ fi
 
 chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR"
 
+echo "==> playwright chromium (HOME=$APP_DIR, user=$SERVICE_USER)"
+sudo -u "$SERVICE_USER" \
+    HOME="$APP_DIR" \
+    PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/.cache/ms-playwright" \
+    "$PY" -m playwright install chromium
+
 echo "==> camoufox fetch"
 sudo -u "$SERVICE_USER" HOME="$APP_DIR" "$PY" -m camoufox fetch
 
+# systemd: явный путь к browsers playwright
 sed -e "s#/opt/inpoland-parser#${APP_DIR}#g" \
     -e "s#^User=.*#User=${SERVICE_USER}#" \
     -e "s#--port 8001#--port ${PORT}#g" \
     "$UNIT_TEMPLATE" > "$UNIT_TARGET"
+# гарантируем PLAYWRIGHT_BROWSERS_PATH в unit
+if ! grep -q PLAYWRIGHT_BROWSERS_PATH "$UNIT_TARGET"; then
+    sed -i "/^Environment=HOME=/a Environment=PLAYWRIGHT_BROWSERS_PATH=${APP_DIR}/.cache/ms-playwright" "$UNIT_TARGET"
+fi
 
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 
+sleep 3
 echo
 systemctl --no-pager --full status "$SERVICE_NAME" || true
 echo
 echo "Проверка:  curl http://127.0.0.1:${PORT}/health"
+curl -sS "http://127.0.0.1:${PORT}/health" || true
+echo
 echo "Docs:      http://SERVER_IP:${PORT}/docs"
 echo "Логи:      journalctl -u ${SERVICE_NAME} -f"
 echo
