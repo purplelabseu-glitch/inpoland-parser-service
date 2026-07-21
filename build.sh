@@ -4,7 +4,16 @@
 # Порт по умолчанию: 8001
 #
 #   sudo bash build.sh
+#   (не sh/dash — нужен bash из-за pipefail)
 #
+# Если ошибка «set: pipefail» / «недопустимое название параметра»:
+#   в файле CRLF с Windows. На сервере:
+#   sed -i 's/\r$//' build.sh && sudo bash build.sh
+#
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "ОШИБКА: запускайте через bash: sudo bash $0" >&2
+    exit 1
+fi
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
