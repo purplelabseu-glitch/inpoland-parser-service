@@ -1,17 +1,17 @@
 /**
  * Ручной обход Cloudflare для in-poland.com (Node + Playwright).
- * Не нужен Python 3.12 / MSVC.
  *
  *   cd D:\work\git\inpoland-parser-service
- *   npm install playwright dotenv
- *   npx playwright install chromium
- *   # PROXY_URL в .env
+ *   # PROXY_URL в .env (scp с VPS!)
  *   node bootstrap_cf.mjs
+ *
+ * Если лента уже на экране — нажми Enter в этом терминале, cookies сохранятся сразу.
  */
 import { chromium } from "playwright";
 import dotenv from "dotenv";
 import fs from "node:fs";
 import path from "node:path";
+import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 dotenv.config();
@@ -26,17 +26,6 @@ const OUT = path.resolve(
 const PROXY_URL = (process.env.PROXY_URL || "").trim();
 const LOCALE = process.env.BROWSER_LOCALE || "ru-RU";
 
-function looksLikeCf(html) {
-  const low = (html || "").toLowerCase();
-  return (
-    low.includes("just a moment") ||
-    low.includes("cf-browser-verification") ||
-    low.includes("challenge-platform") ||
-    low.includes("cdn-cgi/challenge") ||
-    low.includes("checking your browser")
-  );
-}
-
 function proxyFromUrl(url) {
   if (!url) return undefined;
   const u = new URL(url.replace("{session}", "bootstrap1"));
@@ -47,16 +36,55 @@ function proxyFromUrl(url) {
   return cfg;
 }
 
+async function listingReady(page) {
+  const checks = [
+    ".post-preview",
+    "a.post",
+    ".post-preview h2 a",
+    "article",
+    ".flex-block",
+  ];
+  for (const sel of checks) {
+    try {
+      const n = await page.locator(sel).count();
+      if (n > 0) return { ok: true, sel, n };
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    const html = await page.content();
+    if (html.includes("post-preview") || /in-poland\.com\/\d{4}\//i.test(html)) {
+      return { ok: true, sel: "html-marker", n: 1 };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { ok: false };
+}
+
+function waitEnter() {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(
+      "\n>>> Если лента УЖЕ видна в окне — нажми Enter здесь, чтобы сохранить cookies\n",
+      () => {
+        rl.close();
+        resolve();
+      }
+    );
+  });
+}
+
 async function main() {
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   const proxy = proxyFromUrl(PROXY_URL);
 
   console.log("=== bootstrap CF (Node) ===");
   console.log("URL:  ", START_URL);
-  console.log("Proxy:", proxy ? "yes" : "NO — пропиши PROXY_URL в .env");
+  console.log("Proxy:", proxy ? "yes" : "NO — без PROXY_URL cookies с VPS не сработают!");
   console.log("Save: ", OUT);
   console.log("");
-  console.log("Окно Chromium → галочка CF → жду ленту (.post-preview)…");
 
   const browser = await chromium.launch({
     headless: false,
@@ -72,46 +100,37 @@ async function main() {
   const page = await context.newPage();
   await page.goto(START_URL, { waitUntil: "commit", timeout: 180000 });
 
-  let ok = false;
-  for (let i = 0; i < 300; i++) {
-    // Сначала успех: лента уже видна (CF-скрипты могут остаться в HTML)
-    try {
-      const n = await page.locator(".post-preview").count();
-      if (n > 0) {
-        const visible = await page.locator(".post-preview").first().isVisible();
-        if (visible) {
-          ok = true;
-          console.log(`Лента найдена (${n} .post-preview)`);
-          break;
-        }
-      }
-    } catch {
-      /* keep waiting */
-    }
+  // Enter в терминале = принудительное сохранение
+  let forceSave = false;
+  const enterPromise = waitEnter().then(() => {
+    forceSave = true;
+  });
 
-    let html = "";
-    try {
-      html = await page.content();
-    } catch {
-      await page.waitForTimeout(1000);
-      continue;
-    }
-    if (html.includes("post-preview")) {
+  let ok = false;
+  let info = null;
+  for (let i = 0; i < 300; i++) {
+    if (forceSave) {
       ok = true;
-      console.log("Лента найдена в HTML");
+      info = { sel: "manual-Enter", n: 0 };
+      console.log("Сохраняю по Enter…");
       break;
     }
-    if (looksLikeCf(html)) {
-      if (i % 10 === 0) console.log(`  CF ещё активен (${i}s) — кликни галочку если есть`);
-    } else if (i % 10 === 0) {
+    info = await listingReady(page);
+    if (info.ok) {
+      ok = true;
+      console.log(`Лента OK: ${info.sel} x${info.n}`);
+      break;
+    }
+    if (i % 5 === 0) {
       const title = await page.title().catch(() => "");
-      console.log(`  жду ленту… (${i}s) title=${JSON.stringify(title)}`);
+      const url = page.url();
+      console.log(`  жду… ${i}s  title=${JSON.stringify(title)}  url=${url}`);
     }
     await page.waitForTimeout(1000);
   }
 
   if (!ok) {
-    console.error("FAIL: лента не появилась. Cookies НЕ сохранены.");
+    console.error("FAIL: лента не найдена и Enter не нажали. Cookies НЕ сохранены.");
     await browser.close();
     process.exit(1);
   }
@@ -122,12 +141,8 @@ async function main() {
   console.log(`OK → ${OUT}`);
   console.log(`cookies=${cookies.length} cf_clearance=${hasCf}`);
   await browser.close();
-
-  console.log("");
-  console.log("Дальше:");
-  console.log(
-    `  scp "${OUT}" u@31.130.203.134:/home/u/inpoland-parser-service/.cache/inpoland-storage.json`
-  );
+  // не ждём Enter дальше
+  process.exit(0);
 }
 
 main().catch((e) => {
