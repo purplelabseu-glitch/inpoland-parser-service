@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     # Не крутить {session}/refresh-ip на каждой попытке, пока есть сохранённые куки
     sticky_proxy: bool = Field(default=True, alias="STICKY_PROXY")
 
+    # После N подряд проваленных fetch (каждый с BROWSER_MAX_RETRIES + смена IP)
+    # — стоп, чтобы не долбить in-poland. Сброс: новые cookies или /api/v1/circuit/reset
+    circuit_fail_limit: int = Field(default=3, alias="CIRCUIT_FAIL_LIMIT")
+    circuit_enabled: bool = Field(default=True, alias="CIRCUIT_ENABLED")
+
     # --- Сбор ссылок -----------------------------------------------------
     collect_max_pages_default: int = Field(default=10, alias="COLLECT_MAX_PAGES_DEFAULT")
     collect_max_pages_limit: int = Field(default=20, alias="COLLECT_MAX_PAGES_LIMIT")

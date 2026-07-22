@@ -41,3 +41,13 @@ class ParsingFailedError(ParserError):
 
     status_code = 422
     detail = "Не удалось извлечь данные со страницы (изменилась вёрстка?)"
+
+
+class ServicePausedError(ParserError):
+    """Слишком много CF/403 подряд — сервис остановил запросы к сайту."""
+
+    status_code = 503
+    detail = (
+        "Парсер на паузе после серии CF/403. Обновите cookies (bootstrap) "
+        "и вызовите POST /api/v1/circuit/reset"
+    )

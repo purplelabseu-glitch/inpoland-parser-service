@@ -7,8 +7,10 @@ Cloudflare: сохраняем storage_state (cf_clearance и др.), sticky-к�
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -17,7 +19,7 @@ from camoufox.async_api import AsyncCamoufox
 from playwright.async_api import async_playwright
 
 from .config import settings
-from .errors import ParserError, ProxyError, UpstreamForbiddenError
+from .errors import ParserError, ProxyError, ServicePausedError, UpstreamForbiddenError
 from .parser import (
     extract_article,
     extract_listing_items,
@@ -71,6 +73,130 @@ class BrowserManager:
         self._proxy_template: str | None = settings.proxy_url
         self.last_engine: str = ""
         self._storage_path = Path(settings.storage_state_path)
+        self._circuit_path = self._storage_path.parent / "circuit.json"
+        self._consecutive_failures = 0
+        self._circuit_open = False
+        self._circuit_reason = ""
+        self._circuit_opened_at = ""
+        self._cookies_mtime: float | None = None
+
+    def _cookies_mtime_now(self) -> float | None:
+        try:
+            if self._storage_path.is_file():
+                return self._storage_path.stat().st_mtime
+        except OSError:
+            pass
+        return None
+
+    def _load_circuit(self) -> None:
+        if not self._circuit_path.is_file():
+            return
+        try:
+            data = json.loads(self._circuit_path.read_text(encoding="utf-8"))
+            self._circuit_open = bool(data.get("open"))
+            self._circuit_reason = str(data.get("reason") or "")
+            self._circuit_opened_at = str(data.get("opened_at") or "")
+            self._consecutive_failures = int(data.get("failures") or 0)
+            if self._circuit_open:
+                logger.warning(
+                    "Circuit OPEN (из файла): failures=%s reason=%s",
+                    self._consecutive_failures,
+                    self._circuit_reason,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не прочитать circuit.json: %s", exc)
+
+    def _save_circuit(self) -> None:
+        self._circuit_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "open": self._circuit_open,
+            "reason": self._circuit_reason,
+            "opened_at": self._circuit_opened_at,
+            "failures": self._consecutive_failures,
+        }
+        self._circuit_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def circuit_status(self) -> dict:
+        return {
+            "enabled": settings.circuit_enabled,
+            "open": self._circuit_open,
+            "failures": self._consecutive_failures,
+            "fail_limit": settings.circuit_fail_limit,
+            "reason": self._circuit_reason or None,
+            "opened_at": self._circuit_opened_at or None,
+        }
+
+    def reset_circuit(self, reason: str = "manual reset") -> dict:
+        self._circuit_open = False
+        self._circuit_reason = ""
+        self._circuit_opened_at = ""
+        self._consecutive_failures = 0
+        self._cookies_mtime = self._cookies_mtime_now()
+        if self._circuit_path.is_file():
+            try:
+                self._circuit_path.unlink()
+            except OSError:
+                pass
+        logger.info("Circuit RESET: %s", reason)
+        return self.circuit_status()
+
+    def _maybe_auto_reset_on_new_cookies(self) -> None:
+        mtime = self._cookies_mtime_now()
+        if mtime is None:
+            return
+        if self._cookies_mtime is None:
+            self._cookies_mtime = mtime
+            return
+        if mtime > self._cookies_mtime + 0.5:
+            logger.info("Обнаружены новые cookies — сбрасываю circuit")
+            self.reset_circuit("new cookies file")
+
+    def _ensure_circuit_closed(self) -> None:
+        if not settings.circuit_enabled:
+            return
+        self._maybe_auto_reset_on_new_cookies()
+        if self._circuit_open:
+            raise ServicePausedError(
+                f"Парсер на паузе после {self._consecutive_failures} CF/403. "
+                f"Причина: {self._circuit_reason or 'cloudflare'}. "
+                "Обновите .cache/inpoland-storage.json и "
+                "POST /api/v1/circuit/reset"
+            )
+
+    def _on_fetch_success(self) -> None:
+        if self._consecutive_failures or self._circuit_open:
+            logger.info("Fetch OK — сброс счётчика circuit (%s)", self._consecutive_failures)
+        self._consecutive_failures = 0
+        if self._circuit_open:
+            self.reset_circuit("successful fetch")
+        else:
+            self._save_circuit()
+
+    def _on_fetch_failure(self, exc: Exception) -> None:
+        if not settings.circuit_enabled:
+            return
+        self._consecutive_failures += 1
+        logger.warning(
+            "Fetch fail %d/%d: %s",
+            self._consecutive_failures,
+            settings.circuit_fail_limit,
+            exc,
+        )
+        if self._consecutive_failures >= max(1, settings.circuit_fail_limit):
+            self._circuit_open = True
+            self._circuit_reason = str(exc)
+            self._circuit_opened_at = datetime.now(timezone.utc).isoformat()
+            self._save_circuit()
+            logger.error(
+                "CIRCUIT OPEN — стоп запросов к in-poland после %d провалов. "
+                "Нужны новые cookies + POST /api/v1/circuit/reset",
+                self._consecutive_failures,
+            )
+        else:
+            self._save_circuit()
 
     @staticmethod
     def _apply_session(template: str) -> str:
@@ -110,6 +236,8 @@ class BrowserManager:
                 "storage_state пока нет (%s) — после первого успешного обхода CF сохранится",
                 self._storage_path,
             )
+        self._cookies_mtime = self._cookies_mtime_now()
+        self._load_circuit()
 
     async def _ensure_chromium(self) -> None:
         if self._chromium is not None:
@@ -424,6 +552,8 @@ class BrowserManager:
         )
 
     async def fetch_html(self, url: str, expect: str = "any") -> str:
+        self._ensure_circuit_closed()
+
         engines = self._engines_order()
         if not engines:
             raise ParserError("Браузер не инициализирован")
@@ -468,6 +598,7 @@ class BrowserManager:
 
                         if self._html_ok(html, expect):
                             self.last_engine = engine_name
+                            self._on_fetch_success()
                             return html
                         raise UpstreamForbiddenError(
                             f"Страница без контента / CF ({engine_name}, expect={expect})"
@@ -488,6 +619,12 @@ class BrowserManager:
                 await self._close_sticky_chromium()
 
             assert last_error is not None
+            self._on_fetch_failure(last_error)
+            if self._circuit_open:
+                raise ServicePausedError(
+                    f"Парсер на паузе после {self._consecutive_failures} CF/403. "
+                    f"Последняя ошибка: {last_error}"
+                )
             raise last_error
 
     async def collect_category(

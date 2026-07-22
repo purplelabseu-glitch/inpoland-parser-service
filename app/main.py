@@ -85,13 +85,26 @@ async def health() -> dict:
         proxy = await browser_manager.check_proxy()
     except Exception as exc:  # noqa: BLE001
         proxy = {"configured": False, "ok": False, "detail": str(exc)}
-    status = "ok" if proxy.get("ok") else "degraded"
+    circuit = browser_manager.circuit_status()
+    if circuit.get("open"):
+        status = "paused"
+    elif proxy.get("ok"):
+        status = "ok"
+    else:
+        status = "degraded"
     return {
         "status": status,
         "service": "inpoland-parser",
         "proxy": proxy,
         "browser_engine": settings.browser_engine,
+        "circuit": circuit,
     }
+
+
+@app.post("/api/v1/circuit/reset", dependencies=[Depends(require_api_key)])
+async def circuit_reset() -> dict:
+    """Снять паузу после обновления cookies / смены прокси."""
+    return {"ok": True, "circuit": browser_manager.reset_circuit("api reset")}
 
 
 def _clamp_pages(requested: int | None) -> int:
