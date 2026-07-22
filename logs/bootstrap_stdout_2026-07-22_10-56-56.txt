@@ -1,0 +1,13 @@
+Proxy session: bootmrvsh7mu
+=== bootstrap CF ===
+Mode:    auto (wait 90s)
+URL:     https://in-poland.com/category/novosti/
+Kind:    firefox
+Proxy:   yes (Smartproxy)
+Save:    D:\work\git\inpoland-parser-service\.cache\inpoland-storage.json
+
+Browser: playwright-firefox headless= false
+  жду… 0s  title=""  url=https://in-poland.com/category/novosti/
+Лента OK: a.post x4
+OK → D:\work\git\inpoland-parser-service\.cache\inpoland-storage.json
+cookies=3 cf_clearance=true

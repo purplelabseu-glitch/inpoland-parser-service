@@ -1,0 +1,19 @@
+Системный Firefox не стартовал (browserType.launch: Failed to launch the browser process.
+Browser logs:
+
+<launching> C:\Program Files\Mozilla Firefox\firefox.exe -no-remote -wait-for-browser -foreground -profile C:\Users\admin\AppData\Local\Temp\playwright_firefoxdev_profile-p36XTO -juggler-pipe -silent
+<launched> pid=36296
+[pid=36296] <process did exit: exitCode=0, signal=null>
+[pid=36296] starting temporary directories cleanup
+Call log:
+[2m  - <launching> C:\Program Files\Mozilla Firefox\firefox.exe -no-remote -wait-for-browser -foreground -profile C:\Users\admin\AppData\Local\Temp\playwright_firefoxdev_profile-p36XTO -juggler-pipe -silent[22m
+[2m  - <launched> pid=36296[22m
+[2m  - [pid=36296] <process did exit: exitCode=0, signal=null>[22m
+[2m  - [pid=36296] starting temporary directories cleanup[22m
+[2m  - [pid=36296] <gracefully close start>[22m
+[2m  - [pid=36296] <kill>[22m
+[2m  - [pid=36296] <skipped force kill spawnedProcess.killed=false processClosed=true>[22m
+[2m  - [pid=36296] finished temporary directories cleanup[22m
+[2m  - [pid=36296] <gracefully close end>[22m
+), берём Playwright Firefox
+WARNING: нет cf_clearance — на VPS может снова быть 403.
