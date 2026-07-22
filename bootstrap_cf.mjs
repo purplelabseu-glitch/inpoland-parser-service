@@ -47,8 +47,8 @@ const HEADLESS =
   process.env.BOOTSTRAP_HEADLESS === "1" ||
   process.env.BOOTSTRAP_HEADLESS === "true";
 const REQUIRE_CF =
-  process.env.BOOTSTRAP_REQUIRE_CF !== "0" &&
-  process.env.BOOTSTRAP_REQUIRE_CF !== "false";
+  process.env.BOOTSTRAP_REQUIRE_CF === "1" ||
+  process.env.BOOTSTRAP_REQUIRE_CF === "true";
 
 function proxyFromUrl(url) {
   if (!url) return undefined;
@@ -66,25 +66,39 @@ function proxyFromUrl(url) {
 }
 
 async function listingReady(page) {
+  // CF interstitial often has empty/processing body — never treat as success
+  try {
+    const html = (await page.content()).toLowerCase();
+    if (
+      html.includes("processing...") ||
+      html.includes("just a moment") ||
+      html.includes("cf-browser-verification") ||
+      html.includes("challenge-platform")
+    ) {
+      return { ok: false };
+    }
+  } catch {
+    /* ignore */
+  }
+
   const checks = [
     ".post-preview",
-    "a.post",
     ".post-preview h2 a",
-    "article",
-    ".flex-block",
   ];
   for (const sel of checks) {
     try {
       const n = await page.locator(sel).count();
-      if (n > 0) return { ok: true, sel, n };
+      if (n >= 3) return { ok: true, sel, n };
     } catch {
       /* ignore */
     }
   }
+  // a.post alone is too weak (false OK without cf_clearance)
   try {
-    const html = await page.content();
-    if (html.includes("post-preview") || /in-poland\.com\/\d{4}\//i.test(html)) {
-      return { ok: true, sel: "html-marker", n: 1 };
+    const n = await page.locator("a.post").count();
+    const title = (await page.title().catch(() => "")) || "";
+    if (n >= 5 && title.length > 5 && !/just a moment/i.test(title)) {
+      return { ok: true, sel: "a.post", n };
     }
   } catch {
     /* ignore */
@@ -233,6 +247,8 @@ async function main() {
   }
 
   const maxWait = AUTO ? AUTO_WAIT_S : 300;
+  // Give CF/proxy a moment before first "ready" check
+  await page.waitForTimeout(AUTO ? 3000 : 1000);
   let ok = false;
   for (let i = 0; i < maxWait; i++) {
     if (forceSave) {
@@ -267,11 +283,11 @@ async function main() {
   const cookies = await context.cookies();
   const hasCf = cookies.some((c) => c.name === "cf_clearance");
   console.log(`OK → ${OUT}`);
-  console.log(`cookies=${cookies.length} cf_clearance=${hasCf}`);
+  console.log(`cookies=${cookies.length} cf_clearance=${hasCf} names=${cookies.map((c) => c.name).join(",")}`);
   if (!hasCf) {
-    console.warn("WARNING: нет cf_clearance — на VPS может снова быть 403.");
+    console.warn("WARNING: no cf_clearance cookie (page OK anyway — uploading).");
     if (AUTO && REQUIRE_CF) {
-      console.error("FAIL(--auto): BOOTSTRAP_REQUIRE_CF — без cf_clearance не сохраняем как успех.");
+      console.error("FAIL(--auto): BOOTSTRAP_REQUIRE_CF=true and no cf_clearance.");
       try {
         fs.unlinkSync(OUT);
       } catch {
