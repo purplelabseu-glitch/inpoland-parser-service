@@ -47,8 +47,8 @@ const HEADLESS =
   process.env.BOOTSTRAP_HEADLESS === "1" ||
   process.env.BOOTSTRAP_HEADLESS === "true";
 const REQUIRE_CF =
-  process.env.BOOTSTRAP_REQUIRE_CF === "1" ||
-  process.env.BOOTSTRAP_REQUIRE_CF === "true";
+  process.env.BOOTSTRAP_REQUIRE_CF !== "0" &&
+  process.env.BOOTSTRAP_REQUIRE_CF !== "false";
 
 function proxyFromUrl(url) {
   if (!url) return undefined;

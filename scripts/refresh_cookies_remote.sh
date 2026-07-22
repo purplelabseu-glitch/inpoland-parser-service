@@ -1,49 +1,54 @@
 #!/usr/bin/env bash
+# Placeholders replaced by refresh_cookies.ps1: __VPS_DIR__ __API_KEY__ __SUDO_B64__
 set -e
 cd __VPS_DIR__
 
 restart_ok=0
-
-try_restart() {
-  local cmd="$1"
-  local out
-  if out=$(sudo -n $cmd 2>&1); then
-    echo "restart OK: sudo -n $cmd"
-    return 0
-  fi
-  echo "sudo -n failed ($cmd): $out"
-  return 1
-}
-
-if try_restart "/bin/systemctl restart inpoland-parser"; then
-  restart_ok=1
-elif try_restart "/usr/bin/systemctl restart inpoland-parser"; then
-  restart_ok=1
-fi
-
 SUDO_B64='__SUDO_B64__'
-if [ "$restart_ok" -ne 1 ] && [ -n "$SUDO_B64" ] && [ "$SUDO_B64" != "__SUDO_B64__" ]; then
-  PASS=$(printf '%s' "$SUDO_B64" | base64 -d)
-  for cmd in "/bin/systemctl restart inpoland-parser" "/usr/bin/systemctl restart inpoland-parser"; do
-    if printf '%s\n' "$PASS" | sudo -S -p '' $cmd 2>/tmp/inpoland_sudo_err; then
-      echo "restart OK: sudo -S $cmd"
-      restart_ok=1
-      break
-    fi
-    echo "sudo -S failed ($cmd): $(cat /tmp/inpoland_sudo_err 2>/dev/null || true)"
-  done
-  unset PASS
+API_KEY_INLINE='__API_KEY__'
+
+echo "try passwordless /bin/systemctl ..."
+if sudo -n /bin/systemctl restart inpoland-parser; then
+  echo "restart OK: sudo -n /bin/systemctl"
+  restart_ok=1
+else
+  echo "passwordless failed (exit $?)"
 fi
 
 if [ "$restart_ok" -ne 1 ]; then
-  echo "FAIL: cannot restart inpoland-parser."
-  exit 1
+  echo "try passwordless /usr/bin/systemctl ..."
+  if sudo -n /usr/bin/systemctl restart inpoland-parser; then
+    echo "restart OK: sudo -n /usr/bin/systemctl"
+    restart_ok=1
+  else
+    echo "passwordless failed (exit $?)"
+  fi
+fi
+
+if [ "$restart_ok" -ne 1 ]; then
+  if [ -z "$SUDO_B64" ] || [ "$SUDO_B64" = "__SUDO_B64__" ]; then
+    echo "FAIL: no sudo password provided from Windows secret file"
+    exit 1
+  fi
+  echo "try sudo -S with password from secret..."
+  PASS=$(printf '%s' "$SUDO_B64" | base64 -d)
+  set +e
+  printf '%s\n' "$PASS" | sudo -S -p '' /bin/systemctl restart inpoland-parser
+  rc=$?
+  set -e
+  unset PASS
+  if [ "$rc" -eq 0 ]; then
+    echo "restart OK: sudo -S /bin/systemctl"
+    restart_ok=1
+  else
+    echo "FAIL: sudo -S failed rc=$rc"
+    exit 1
+  fi
 fi
 
 sleep 8
 curl -sS --max-time 20 http://127.0.0.1:8001/health || true
 echo
-API_KEY_INLINE='__API_KEY__'
 if [ -n "$API_KEY_INLINE" ] && [ "$API_KEY_INLINE" != "__API_KEY__" ]; then
   KEY="$API_KEY_INLINE"
 else
