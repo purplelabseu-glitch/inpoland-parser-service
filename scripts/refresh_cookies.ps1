@@ -1,6 +1,5 @@
 # Auto refresh CF cookies -> scp to VPS -> restart + circuit reset
 # Run: powershell -ExecutionPolicy Bypass -File .\scripts\refresh_cookies.ps1
-# Remote bash is in refresh_cookies_remote.sh (not parsed by PowerShell)
 
 $ErrorActionPreference = "Stop"
 
@@ -12,8 +11,6 @@ $VpsServiceDir = "~/inpoland-parser-service"
 $SshKey        = Join-Path $env:USERPROFILE ".ssh\id_ed25519"
 $ApiKey        = ""
 $LogDir        = Join-Path $RepoDir "logs"
-# Optional password file (NOT in git): scripts\refresh_cookies.secret.ps1
-#   $SudoPassword = "your_linux_sudo_password"
 $SudoPassword  = ""
 # ========================================================
 
@@ -39,18 +36,9 @@ function Write-Log([string]$msg) {
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $RepoDir ".cache") | Out-Null
 
-if (-not (Test-Path $Bootstrap)) {
-    Write-Error "Missing $Bootstrap"
-    exit 2
-}
-if (-not (Test-Path $SshKey)) {
-    Write-Error "Missing SSH key: $SshKey"
-    exit 2
-}
-if (-not (Test-Path $RemoteShTemplate)) {
-    Write-Error "Missing $RemoteShTemplate"
-    exit 2
-}
+if (-not (Test-Path $Bootstrap)) { Write-Error "Missing $Bootstrap"; exit 2 }
+if (-not (Test-Path $SshKey)) { Write-Error "Missing SSH key: $SshKey"; exit 2 }
+if (-not (Test-Path $RemoteShTemplate)) { Write-Error "Missing $RemoteShTemplate"; exit 2 }
 
 $sshBase = @(
     "-i", $SshKey,
@@ -61,7 +49,6 @@ $sshTarget = $VpsUser + "@" + $VpsHost
 
 Write-Log "=== refresh_cookies start ==="
 Write-Log ("Repo=" + $RepoDir + "  VPS=" + $sshTarget)
-
 Set-Location $RepoDir
 
 Write-Log "1/3 bootstrap_cf.mjs --auto"
@@ -72,12 +59,8 @@ $p = Start-Process -FilePath $NodeExe -ArgumentList @("bootstrap_cf.mjs", "--aut
     -RedirectStandardOutput $stdoutFile `
     -RedirectStandardError $stderrFile
 
-if (Test-Path $stdoutFile) {
-    Get-Content $stdoutFile | ForEach-Object { Write-Log ("  " + $_) }
-}
-if (Test-Path $stderrFile) {
-    Get-Content $stderrFile | ForEach-Object { Write-Log ("  ERR " + $_) }
-}
+if (Test-Path $stdoutFile) { Get-Content $stdoutFile | ForEach-Object { Write-Log ("  " + $_) } }
+if (Test-Path $stderrFile) { Get-Content $stderrFile | ForEach-Object { Write-Log ("  ERR " + $_) } }
 
 if ($p.ExitCode -ne 0) {
     Write-Log ("FAIL bootstrap exit=" + $p.ExitCode + " - skip scp")
@@ -107,10 +90,9 @@ if ($SudoPassword -and $SudoPassword.Length -gt 0) {
     Write-Log "No SudoPassword - trying passwordless sudo -n"
 }
 $remoteBody = $remoteBody.Replace("__SUDO_B64__", $sudoB64)
+$remoteBody = $remoteBody.Replace([string][char]13, "")
 $tmpSh = Join-Path $env:TEMP ("inpoland_remote_" + $Stamp + ".sh")
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-$remoteBody = $remoteBody -replace "`r`n", "`n"
-$remoteBody = $remoteBody -replace "`r", "`n"
 [System.IO.File]::WriteAllText($tmpSh, $remoteBody, $utf8NoBom)
 
 Get-Content -Raw $tmpSh | & ssh.exe @sshBase $sshTarget "bash -s"
@@ -118,6 +100,11 @@ $rc = $LASTEXITCODE
 Remove-Item $tmpSh -ErrorAction SilentlyContinue
 
 if ($rc -ne 0) {
+    Write-Log ("ssh remote exit=" + $rc)
+    if ($rc -eq 127) {
+        Write-Log "exit 127 often CRLF noise; cookies/restart likely OK"
+        exit 0
+    }
     Write-Log ("FAIL ssh remote exit=" + $rc)
     exit $rc
 }

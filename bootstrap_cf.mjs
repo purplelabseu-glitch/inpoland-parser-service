@@ -65,26 +65,65 @@ function proxyFromUrl(url) {
   return cfg;
 }
 
-async function listingReady(page) {
-  // CF interstitial often has empty/processing body — never treat as success
-  try {
-    const html = (await page.content()).toLowerCase();
-    if (
-      html.includes("processing...") ||
-      html.includes("just a moment") ||
-      html.includes("cf-browser-verification") ||
-      html.includes("challenge-platform")
-    ) {
-      return { ok: false };
+async function dismissConsent(page) {
+  const candidates = [
+    'button:has-text("Принять")',
+    'button:has-text("Соглас")',
+    'button:has-text("Accept")',
+    'button:has-text("Allow")',
+    'button:has-text("OK")',
+    '[id*="accept"]',
+    '[class*="accept"]',
+    'a:has-text("Принять")',
+  ];
+  for (const sel of candidates) {
+    try {
+      const loc = page.locator(sel).first();
+      if ((await loc.count()) > 0 && (await loc.isVisible())) {
+        await loc.click({ timeout: 2000 });
+        console.log("Clicked consent:", sel);
+        await page.waitForTimeout(500);
+        return;
+      }
+    } catch {
+      /* ignore */
     }
+  }
+}
+
+async function listingReady(page) {
+  let title = "";
+  try {
+    title = (await page.title()) || "";
   } catch {
-    /* ignore */
+    return { ok: false };
+  }
+  const titleLow = title.toLowerCase();
+
+  // Listing title = success (do NOT scan page HTML for CF script URLs — false negatives)
+  if (
+    titleLow.includes("публикац") ||
+    titleLow.includes("категор") ||
+    titleLow.includes("publikac") ||
+    titleLow.includes("kategor") ||
+    (titleLow.includes("новост") && titleLow.includes("польш"))
+  ) {
+    return { ok: true, sel: "title", n: 1 };
   }
 
-  const checks = [
-    ".post-preview",
-    ".post-preview h2 a",
-  ];
+  // Obvious CF interstitial only
+  if (/just a moment/i.test(title) || /^$/i.test(title.trim())) {
+    try {
+      const html = (await page.content()).toLowerCase();
+      if (html.includes("processing...") && html.length < 2000) {
+        return { ok: false };
+      }
+    } catch {
+      return { ok: false };
+    }
+  }
+
+  const checks = [".post-preview", ".post-preview h2 a", "a.post"];
   for (const sel of checks) {
     try {
       const n = await page.locator(sel).count();
@@ -92,16 +131,6 @@ async function listingReady(page) {
     } catch {
       /* ignore */
     }
-  }
-  // a.post alone is too weak (false OK without cf_clearance)
-  try {
-    const n = await page.locator("a.post").count();
-    const title = (await page.title().catch(() => "")) || "";
-    if (n >= 5 && title.length > 5 && !/just a moment/i.test(title)) {
-      return { ok: true, sel: "a.post", n };
-    }
-  } catch {
-    /* ignore */
   }
   return { ok: false };
 }
@@ -248,13 +277,17 @@ async function main() {
 
   const maxWait = AUTO ? AUTO_WAIT_S : 300;
   // Give CF/proxy a moment before first "ready" check
-  await page.waitForTimeout(AUTO ? 3000 : 1000);
+  await page.waitForTimeout(AUTO ? 2000 : 1000);
+  await dismissConsent(page);
   let ok = false;
   for (let i = 0; i < maxWait; i++) {
     if (forceSave) {
       ok = true;
-      console.log("Сохраняю по Enter…");
+      console.log("Saving on Enter…");
       break;
+    }
+    if (i > 0 && i % 10 === 0) {
+      await dismissConsent(page);
     }
     const info = await listingReady(page);
     if (info.ok) {
@@ -264,9 +297,14 @@ async function main() {
     }
     if (i % 5 === 0) {
       const title = await page.title().catch(() => "");
-      console.log(`  жду… ${i}s  title=${JSON.stringify(title)}  url=${page.url()}`);
+      console.log(`  wait… ${i}s  title=${JSON.stringify(title)}  url=${page.url()}`);
     }
-    await page.waitForTimeout(1000);
+    try {
+      await page.waitForTimeout(1000);
+    } catch (e) {
+      console.error("Browser/page closed while waiting — do not close Firefox until script finishes.");
+      throw e;
+    }
   }
 
   if (!ok) {
