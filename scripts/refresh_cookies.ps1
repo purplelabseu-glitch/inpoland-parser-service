@@ -95,7 +95,17 @@ $tmpSh = Join-Path $env:TEMP ("inpoland_remote_" + $Stamp + ".sh")
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText($tmpSh, $remoteBody, $utf8NoBom)
 
-Get-Content -Raw $tmpSh | & ssh.exe @sshBase $sshTarget "bash -s"
+$remoteTmp = "/tmp/inpoland_refresh_" + $Stamp + ".sh"
+& scp.exe @sshBase $tmpSh ($sshTarget + ":" + $remoteTmp)
+if ($LASTEXITCODE -ne 0) {
+    Write-Log ("FAIL scp remote script exit=" + $LASTEXITCODE)
+    Remove-Item $tmpSh -ErrorAction SilentlyContinue
+    exit $LASTEXITCODE
+}
+
+# strip CR on Linux then run
+$remoteCmd = "tr -d '\r' < " + $remoteTmp + " | bash; ec=`$?; rm -f " + $remoteTmp + "; exit `$ec"
+& ssh.exe @sshBase $sshTarget $remoteCmd
 $rc = $LASTEXITCODE
 Remove-Item $tmpSh -ErrorAction SilentlyContinue
 
