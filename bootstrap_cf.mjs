@@ -91,12 +91,34 @@ async function dismissConsent(page) {
   }
 }
 
+async function pageSnippet(page) {
+  try {
+    const title = (await page.title()) || "";
+    const bodyText = await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
+    const htmlLen = await page.evaluate(() => document.documentElement?.outerHTML?.length || 0).catch(() => 0);
+    return { title, bodyText: (bodyText || "").slice(0, 400), htmlLen };
+  } catch {
+    return { title: "", bodyText: "", htmlLen: 0 };
+  }
+}
+
+function isCfProcessing(snip) {
+  const t = `${snip.title}\n${snip.bodyText}`.toLowerCase();
+  return (
+    t.includes("processing...") ||
+    t.includes("just a moment") ||
+    t.includes("checking your browser") ||
+    t.includes("attention required") ||
+    /403\s*forbidden/.test(t)
+  );
+}
+
 async function listingReady(page) {
   let title = "";
   try {
     title = (await page.title()) || "";
   } catch {
-    return { ok: false };
+    return { ok: false, cf: false };
   }
   const titleLow = title.toLowerCase();
 
@@ -108,7 +130,12 @@ async function listingReady(page) {
     titleLow.includes("kategor") ||
     (titleLow.includes("новост") && titleLow.includes("польш"))
   ) {
-    return { ok: true, sel: "title", n: 1 };
+    return { ok: true, sel: "title", n: 1, cf: false };
+  }
+
+  const snip = await pageSnippet(page);
+  if (isCfProcessing(snip)) {
+    return { ok: false, cf: true };
   }
 
   // Obvious CF interstitial only
@@ -116,10 +143,10 @@ async function listingReady(page) {
     try {
       const html = (await page.content()).toLowerCase();
       if (html.includes("processing...") && html.length < 2000) {
-        return { ok: false };
+        return { ok: false, cf: true };
       }
     } catch {
-      return { ok: false };
+      return { ok: false, cf: false };
     }
   }
 
@@ -127,12 +154,12 @@ async function listingReady(page) {
   for (const sel of checks) {
     try {
       const n = await page.locator(sel).count();
-      if (n >= 3) return { ok: true, sel, n };
+      if (n >= 3) return { ok: true, sel, n, cf: false };
     } catch {
       /* ignore */
     }
   }
-  return { ok: false };
+  return { ok: false, cf: false };
 }
 
 function waitEnter() {
@@ -280,6 +307,8 @@ async function main() {
   await page.waitForTimeout(AUTO ? 2000 : 1000);
   await dismissConsent(page);
   let ok = false;
+  let cfStuck = 0;
+  let reloads = 0;
   for (let i = 0; i < maxWait; i++) {
     if (forceSave) {
       ok = true;
@@ -295,9 +324,36 @@ async function main() {
       console.log(`Лента OK: ${info.sel} x${info.n}`);
       break;
     }
+    if (info.cf) {
+      cfStuck += 1;
+    } else {
+      cfStuck = 0;
+    }
+    // CF "Processing..." иногда залипает — F5 / повторный goto
+    if (cfStuck > 0 && cfStuck % 25 === 0 && reloads < 4) {
+      reloads += 1;
+      console.log(`CF stuck on Processing… reload ${reloads}/4`);
+      try {
+        await page.reload({ waitUntil: "commit", timeout: 120000 });
+      } catch {
+        try {
+          await page.goto(START_URL, { waitUntil: "commit", timeout: 180000 });
+        } catch (e) {
+          console.warn(`reload/goto failed: ${e.message}`);
+        }
+      }
+      cfStuck = 0;
+      await page.waitForTimeout(2000);
+      continue;
+    }
     if (i % 5 === 0) {
-      const title = await page.title().catch(() => "");
-      console.log(`  wait… ${i}s  title=${JSON.stringify(title)}  url=${page.url()}`);
+      const snip = await pageSnippet(page);
+      console.log(
+        `  wait… ${i}s  title=${JSON.stringify(snip.title)}  cf=${info.cf}  url=${page.url()}`
+      );
+      if (info.cf && snip.bodyText) {
+        console.log(`  body: ${JSON.stringify(snip.bodyText.slice(0, 120))}`);
+      }
     }
     try {
       await page.waitForTimeout(1000);
