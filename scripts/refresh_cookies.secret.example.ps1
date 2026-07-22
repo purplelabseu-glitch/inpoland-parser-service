@@ -1,2 +1,3 @@
-# Copy to refresh_cookies.secret.ps1 and set password. DO NOT commit.
-$SudoPassword = "CHANGE_ME"
+# Local only - DO NOT commit (gitignored).
+# Linux sudo password for user on VPS:
+$SudoPassword = "PUT_PASSWORD_HERE"

@@ -113,7 +113,7 @@ $remoteBody = $remoteBody -replace "`r`n", "`n"
 $remoteBody = $remoteBody -replace "`r", "`n"
 [System.IO.File]::WriteAllText($tmpSh, $remoteBody, $utf8NoBom)
 
-Get-Content -Raw $tmpSh | & ssh.exe @sshBase $sshTarget "bash -s"
+Get-Content -Raw $tmpSh | & ssh.exe @sshBase -tt $sshTarget "bash -s"
 $rc = $LASTEXITCODE
 Remove-Item $tmpSh -ErrorAction SilentlyContinue
 

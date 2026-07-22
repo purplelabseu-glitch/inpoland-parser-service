@@ -1,0 +1,18 @@
+Системный Firefox не стартовал (browserType.launch: Failed to launch the browser process.
+Browser logs:
+
+<launching> C:\Program Files\Mozilla Firefox\firefox.exe -no-remote -wait-for-browser -foreground -profile C:\Users\admin\AppData\Local\Temp\playwright_firefoxdev_profile-ve8WJU -juggler-pipe -silent
+<launched> pid=25884
+[pid=25884] <process did exit: exitCode=0, signal=null>
+[pid=25884] starting temporary directories cleanup
+Call log:
+[2m  - <launching> C:\Program Files\Mozilla Firefox\firefox.exe -no-remote -wait-for-browser -foreground -profile C:\Users\admin\AppData\Local\Temp\playwright_firefoxdev_profile-ve8WJU -juggler-pipe -silent[22m
+[2m  - <launched> pid=25884[22m
+[2m  - [pid=25884] <process did exit: exitCode=0, signal=null>[22m
+[2m  - [pid=25884] starting temporary directories cleanup[22m
+[2m  - [pid=25884] <gracefully close start>[22m
+[2m  - [pid=25884] <kill>[22m
+[2m  - [pid=25884] <skipped force kill spawnedProcess.killed=false processClosed=true>[22m
+[2m  - [pid=25884] finished temporary directories cleanup[22m
+[2m  - [pid=25884] <gracefully close end>[22m
+), берём Playwright Firefox
