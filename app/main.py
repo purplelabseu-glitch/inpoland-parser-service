@@ -32,6 +32,77 @@ logging.basicConfig(
 )
 logger = logging.getLogger("inpoland_parser")
 
+API_DESCRIPTION = """
+Микросервис сбора новостей [in-poland.com](https://in-poland.com/) через прокси
+(Camoufox / Chromium). Не связан с mobile.de (тот на `:8000`).
+
+Заголовок API: `X-API-Key` (значение из `.env` → `API_KEY`).
+
+---
+
+## Если сломались Cloudflare cookies
+
+Признаки: в логах `Cloudflare/challenge`, `403`, `Processing...`,
+`health.status` = `paused` / `circuit.open` = true.
+
+### 1. Рабочая машина (VPN выключен)
+
+В каталоге клона репозитория `inpoland-parser-service`
+(нужны `PROXY_URL` в `.env` — тот же Smartproxy, что на VPS):
+
+```bash
+node bootstrap_cf.mjs
+```
+
+Откроется Firefox через прокси → пройдите Cloudflare вручную.
+Когда видна лента новостей — нажмите **Enter** в терминале.
+Файл: `.cache/inpoland-storage.json`.
+
+### 2. Залить cookies на VPS
+
+```bash
+scp .cache/inpoland-storage.json USER@VPS_HOST:~/inpoland-parser-service/.cache/inpoland-storage.json
+```
+
+(`USER` / `VPS_HOST` — ваши; путь к сервису на сервере может отличаться.)
+
+### 3. На VPS
+
+Окно логов:
+
+```bash
+sudo journalctl -u inpoland-parser -f
+```
+
+В другом терминале:
+
+```bash
+cd ~/inpoland-parser-service   # или ваш путь к сервису
+sudo systemctl restart inpoland-parser
+curl -sS http://127.0.0.1:8001/health
+# нужно: "cookies_present": true
+
+API_KEY=$(grep -E '^API_KEY=' .env | head -1 | cut -d= -f2- | tr -d '\r')
+curl -sS -X POST http://127.0.0.1:8001/api/v1/circuit/reset -H "X-API-Key: $API_KEY"
+```
+
+### 4. Проверка
+
+Cron/import на сайте снова пойдут сами, либо вручную
+`import_inpoland.php` на dziendol.
+
+Пока эти cookies живы — **не меняйте** `session-...` в `PROXY_URL`
+(`cf_clearance` привязан к IP прокси).
+
+---
+
+## Circuit (автопауза)
+
+После `CIRCUIT_FAIL_LIMIT` подряд проваленных fetch сервис
+перестаёт ходить на сайт (`503`, `circuit.open`).
+Сброс: новые cookies (см. выше) и/или `POST /api/v1/circuit/reset`.
+"""
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -52,10 +123,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="in-poland.com parser",
     version="1.0.0",
-    description=(
-        "Микросервис сбора новостей in-poland.com через прокси "
-        "(Camoufox + fallback Chromium). Не связан с mobile.de."
-    ),
+    description=API_DESCRIPTION,
     lifespan=lifespan,
 )
 
@@ -103,7 +171,10 @@ async def health() -> dict:
 
 @app.post("/api/v1/circuit/reset", dependencies=[Depends(require_api_key)])
 async def circuit_reset() -> dict:
-    """Снять паузу после обновления cookies / смены прокси."""
+    """Снять автопаузу (circuit) после заливки новых cookies.
+
+    См. блок «Если сломались Cloudflare cookies» в описании API (/docs).
+    """
     return {"ok": True, "circuit": browser_manager.reset_circuit("api reset")}
 
 

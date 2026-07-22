@@ -17,12 +17,42 @@ cron на dziendol.pl
 
 | Метод | Путь | Назначение |
 |-------|------|------------|
-| GET | `/health` | статус + проверка прокси |
+| GET | `/health` | статус + прокси + `circuit` + cookies |
 | POST | `/api/v1/collect` | лента одной категории (`max_pages`, по умолчанию 10) |
 | POST | `/api/v1/collect_all` | все категории, `novosti` первой |
 | POST | `/api/v1/parse` | HTML + title/text/date статьи |
+| POST | `/api/v1/circuit/reset` | снять автопаузу после новых cookies |
 
 Заголовок: `X-API-Key: <API_KEY>` (если задан в `.env`).
+
+Swagger: `/docs` на хосте сервиса (например `http://<VPS>:8001/docs`).
+
+## Если сломались Cloudflare cookies
+
+1. **Рабочая машина** (VPN off), в каталоге репо, с `PROXY_URL` в `.env`:
+   ```bash
+   node bootstrap_cf.mjs
+   ```
+   Пройти CF в Firefox → Enter → файл `.cache/inpoland-storage.json`.
+
+2. **Залить на VPS:**
+   ```bash
+   scp .cache/inpoland-storage.json USER@VPS_HOST:~/inpoland-parser-service/.cache/inpoland-storage.json
+   ```
+
+3. **На VPS** — логи: `sudo journalctl -u inpoland-parser -f`  
+   Затем:
+   ```bash
+   cd ~/inpoland-parser-service
+   sudo systemctl restart inpoland-parser
+   curl -sS http://127.0.0.1:8001/health   # cookies_present: true
+   API_KEY=$(grep -E '^API_KEY=' .env | head -1 | cut -d= -f2- | tr -d '\r')
+   curl -sS -X POST http://127.0.0.1:8001/api/v1/circuit/reset -H "X-API-Key: $API_KEY"
+   ```
+
+4. Проверка import/cron на сайте.
+
+Пока cookies живы — не меняйте `session` в `PROXY_URL`.
 
 ## Браузер
 
