@@ -52,7 +52,18 @@ Swagger: `/docs` на хосте сервиса (например `http://<VPS>:
 
 4. Проверка import/cron на сайте.
 
-Пока cookies живы — не меняйте `session` в `PROXY_URL`.
+Пока cookies живы — не меняйте `session` в `PROXY_URL`. На Windows и VPS
+задайте одинаковый `PROXY_SESSION=inpoland1`.
+
+## Автообновление cookies (Task Scheduler)
+
+1. Заполнить `scripts/refresh_cookies.ps1` (плейсхолдеры `USER` / `VPS_HOST` / путь).
+2. SSH-ключ без пароля на VPS.
+3. Раз в 2 часа:
+   ```text
+   powershell.exe -ExecutionPolicy Bypass -File "...\scripts\refresh_cookies.ps1"
+   ```
+4. Ручной тест: `node bootstrap_cf.mjs --auto`
 
 ## Браузер
 

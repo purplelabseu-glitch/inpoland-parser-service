@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     proxy_pool_raw: str | None = Field(default=None, alias="PROXY_POOL")
     proxy_refresh_url: str | None = Field(default=None, alias="PROXY_REFRESH_URL")
     refresh_wait_s: float = Field(default=4.0, alias="REFRESH_WAIT_S")
+    # Фиксированная подстановка {session} в PROXY_URL (как PROXY_SESSION в bootstrap_cf.mjs)
+    proxy_session: str | None = Field(default=None, alias="PROXY_SESSION")
 
     max_retries: int = Field(default=3, alias="MAX_RETRIES")
     retry_backoff: float = Field(default=1.5, alias="RETRY_BACKOFF")

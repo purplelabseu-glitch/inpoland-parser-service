@@ -202,6 +202,9 @@ class BrowserManager:
     def _apply_session(template: str) -> str:
         if "{session}" not in template:
             return template
+        fixed = (settings.proxy_session or "").strip()
+        if fixed:
+            return template.replace("{session}", fixed)
         return template.replace("{session}", secrets.token_hex(6))
 
     async def start(self) -> None:

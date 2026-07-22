@@ -1,20 +1,19 @@
 /**
- * Ручной обход Cloudflare (локально) → cookies для VPS.
+ * Обход Cloudflare (локально) → cookies для VPS.
  *
- * По умолчанию — Playwright Firefox (тот же движок-семейство, что Camoufox на VPS).
- *
- *   cd D:\work\git\inpoland-parser-service
- *   # PROXY_URL в .env = как на VPS (Smartproxy)
- *   npx playwright install firefox
+ * Ручной:
  *   node bootstrap_cf.mjs
+ *   (Enter, когда лента видна)
  *
- * Другие варианты:
- *   set BOOTSTRAP_BROWSER=firefox
- *   set BOOTSTRAP_BROWSER=chrome
- *   set BOOTSTRAP_BROWSER=msedge
- *   set BOOTSTRAP_BROWSER=chromium
+ * Авто (Task Scheduler / cron), без Enter:
+ *   node bootstrap_cf.mjs --auto
+ *   ждёт ленту до BOOTSTRAP_AUTO_WAIT_S (по умолчанию 90), иначе exit 1
  *
- * VPN выключить. Если лента видна — Enter в терминале.
+ * Важно для IP: задайте одинаковый PROXY_SESSION на Windows и VPS
+ * (или уберите {session} из PROXY_URL и пропишите фиксированный session-...).
+ * Иначе cookies с одного IP, а парсер на другом.
+ *
+ * VPN выключить. В .env нужен PROXY_URL.
  */
 import { chromium, firefox } from "playwright";
 import dotenv from "dotenv";
@@ -39,15 +38,30 @@ const BROWSER_KIND = (
   process.env.BOOTSTRAP_CHANNEL ||
   "firefox"
 ).toLowerCase();
+const AUTO = process.argv.includes("--auto");
+const AUTO_WAIT_S = Math.max(
+  15,
+  parseInt(process.env.BOOTSTRAP_AUTO_WAIT_S || "90", 10) || 90
+);
+const HEADLESS =
+  process.env.BOOTSTRAP_HEADLESS === "1" ||
+  process.env.BOOTSTRAP_HEADLESS === "true";
+const REQUIRE_CF =
+  process.env.BOOTSTRAP_REQUIRE_CF === "1" ||
+  process.env.BOOTSTRAP_REQUIRE_CF === "true";
 
 function proxyFromUrl(url) {
   if (!url) return undefined;
-  const session = `boot${Date.now().toString(36)}`;
+  // Стабильная session — чтобы IP совпал с VPS (см. PROXY_SESSION в .env)
+  const session =
+    (process.env.PROXY_SESSION || process.env.BOOTSTRAP_SESSION || "").trim() ||
+    `boot${Date.now().toString(36)}`;
   const u = new URL(url.replaceAll("{session}", session));
   const server = `${u.protocol}//${u.hostname}:${u.port || (u.protocol === "https:" ? 443 : 80)}`;
   const cfg = { server };
   if (u.username) cfg.username = decodeURIComponent(u.username);
   if (u.password) cfg.password = decodeURIComponent(u.password);
+  console.log("Proxy session:", session);
   return cfg;
 }
 
@@ -106,7 +120,7 @@ function systemFirefoxPath() {
 }
 
 async function launchBrowser() {
-  const headless = false;
+  const headless = HEADLESS;
   const args = ["--disable-blink-features=AutomationControlled"];
 
   if (BROWSER_KIND === "firefox" || BROWSER_KIND === "ff") {
@@ -114,18 +128,17 @@ async function launchBrowser() {
     try {
       if (exe) {
         const browser = await firefox.launch({ headless, executablePath: exe });
-        console.log("Browser: system-firefox", exe);
+        console.log("Browser: system-firefox", exe, "headless=", headless);
         return { browser, family: "firefox" };
       }
     } catch (e) {
       console.warn(`Системный Firefox не стартовал (${e.message}), берём Playwright Firefox`);
     }
     const browser = await firefox.launch({ headless });
-    console.log("Browser: playwright-firefox");
+    console.log("Browser: playwright-firefox headless=", headless);
     return { browser, family: "firefox" };
   }
 
-  // Chrome / Edge / Chromium
   const common = { headless, args };
   const channels = [];
   if (BROWSER_KIND === "chromium") channels.push(null);
@@ -143,7 +156,7 @@ async function launchBrowser() {
       const opts = { ...common };
       if (ch) opts.channel = ch;
       const browser = await chromium.launch(opts);
-      console.log("Browser:", ch || "playwright-chromium");
+      console.log("Browser:", ch || "playwright-chromium", "headless=", headless);
       return { browser, family: "chromium" };
     } catch (e) {
       lastErr = e;
@@ -158,12 +171,17 @@ async function main() {
   const proxy = proxyFromUrl(PROXY_URL);
 
   console.log("=== bootstrap CF ===");
+  console.log("Mode:   ", AUTO ? `auto (wait ${AUTO_WAIT_S}s)` : "manual (Enter)");
   console.log("URL:    ", START_URL);
   console.log("Kind:   ", BROWSER_KIND);
   console.log("Proxy:  ", proxy ? "yes (Smartproxy)" : "NO — без PROXY_URL cookies на VPS не сработают!");
   console.log("Save:   ", OUT);
-  console.log("VPS tip: BROWSER_ENGINE=camoufox  (тот же Firefox-family)");
   console.log("");
+
+  if (!proxy) {
+    console.error("FAIL: PROXY_URL пустой — автозаливку на VPS делать нельзя.");
+    process.exit(2);
+  }
 
   const { browser } = await launchBrowser();
   const context = await browser.newContext({
@@ -181,12 +199,15 @@ async function main() {
   await page.goto(START_URL, { waitUntil: "commit", timeout: 180000 });
 
   let forceSave = false;
-  waitEnter().then(() => {
-    forceSave = true;
-  });
+  if (!AUTO) {
+    waitEnter().then(() => {
+      forceSave = true;
+    });
+  }
 
+  const maxWait = AUTO ? AUTO_WAIT_S : 300;
   let ok = false;
-  for (let i = 0; i < 300; i++) {
+  for (let i = 0; i < maxWait; i++) {
     if (forceSave) {
       ok = true;
       console.log("Сохраняю по Enter…");
@@ -206,7 +227,11 @@ async function main() {
   }
 
   if (!ok) {
-    console.error("FAIL: лента не найдена и Enter не нажали. Cookies НЕ сохранены.");
+    console.error(
+      AUTO
+        ? `FAIL(--auto): лента не появилась за ${AUTO_WAIT_S}s. Cookies НЕ сохранены.`
+        : "FAIL: лента не найдена и Enter не нажали. Cookies НЕ сохранены."
+    );
     await browser.close();
     process.exit(1);
   }
@@ -218,6 +243,16 @@ async function main() {
   console.log(`cookies=${cookies.length} cf_clearance=${hasCf}`);
   if (!hasCf) {
     console.warn("WARNING: нет cf_clearance — на VPS может снова быть 403.");
+    if (AUTO && REQUIRE_CF) {
+      console.error("FAIL(--auto): BOOTSTRAP_REQUIRE_CF — без cf_clearance не сохраняем как успех.");
+      try {
+        fs.unlinkSync(OUT);
+      } catch {
+        /* ignore */
+      }
+      await browser.close();
+      process.exit(1);
+    }
   }
   await browser.close();
   process.exit(0);
