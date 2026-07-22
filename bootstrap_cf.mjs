@@ -124,15 +124,22 @@ async function launchBrowser() {
   const args = ["--disable-blink-features=AutomationControlled"];
 
   if (BROWSER_KIND === "firefox" || BROWSER_KIND === "ff") {
-    const exe = systemFirefoxPath();
-    try {
-      if (exe) {
-        const browser = await firefox.launch({ headless, executablePath: exe });
-        console.log("Browser: system-firefox", exe, "headless=", headless);
-        return { browser, family: "firefox" };
+    // System Firefox often fails under Playwright on Windows — use bundled first.
+    // Set BOOTSTRAP_SYSTEM_FIREFOX=1 to try installed Firefox first.
+    const preferSystem =
+      process.env.BOOTSTRAP_SYSTEM_FIREFOX === "1" ||
+      process.env.BOOTSTRAP_SYSTEM_FIREFOX === "true";
+    if (preferSystem) {
+      const exe = systemFirefoxPath();
+      try {
+        if (exe) {
+          const browser = await firefox.launch({ headless, executablePath: exe });
+          console.log("Browser: system-firefox", exe, "headless=", headless);
+          return { browser, family: "firefox" };
+        }
+      } catch (e) {
+        console.warn(`System Firefox failed (${e.message}), using Playwright Firefox`);
       }
-    } catch (e) {
-      console.warn(`Системный Firefox не стартовал (${e.message}), берём Playwright Firefox`);
     }
     const browser = await firefox.launch({ headless });
     console.log("Browser: playwright-firefox headless=", headless);
@@ -196,7 +203,27 @@ async function main() {
   });
 
   const page = await context.newPage();
-  await page.goto(START_URL, { waitUntil: "commit", timeout: 180000 });
+  const gotoAttempts = AUTO ? 3 : 1;
+  let gotoOk = false;
+  let lastGotoErr = null;
+  for (let g = 1; g <= gotoAttempts; g++) {
+    try {
+      console.log(`goto attempt ${g}/${gotoAttempts}...`);
+      await page.goto(START_URL, { waitUntil: "commit", timeout: 180000 });
+      gotoOk = true;
+      break;
+    } catch (e) {
+      lastGotoErr = e;
+      console.warn(`goto failed (${e.message})`);
+      if (g < gotoAttempts) {
+        await page.waitForTimeout(2000 * g);
+      }
+    }
+  }
+  if (!gotoOk) {
+    await browser.close();
+    throw lastGotoErr || new Error("goto failed");
+  }
 
   let forceSave = false;
   if (!AUTO) {
